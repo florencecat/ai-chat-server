@@ -14,38 +14,41 @@ import (
 	"ai-server/cache"
 	"ai-server/config"
 	"ai-server/gigachat"
-	"ai-server/quota"
+	"ai-server/pocketbase"
 )
 
 type Handler struct {
 	gc  *gigachat.Client
 	c   *cache.Cache
-	q   *quota.Manager
+	pb  *pocketbase.Client
 	cfg *config.Config
 }
 
-func New(gc *gigachat.Client, c *cache.Cache, q *quota.Manager, cfg *config.Config) *Handler {
-	return &Handler{gc: gc, c: c, q: q, cfg: cfg}
+func New(gc *gigachat.Client, c *cache.Cache, pb *pocketbase.Client, cfg *config.Config) *Handler {
+	return &Handler{gc: gc, c: c, pb: pb, cfg: cfg}
 }
 
+// ── Request / Response types ──────────────────────────────────────────────────
+
 type ChatRequest struct {
-	UserID  string `json:"user_id" binding:"required"`
+	Token   string `json:"token"   binding:"required"`
 	Message string `json:"message" binding:"required"`
 }
 
 type ChatResponse struct {
-	Response json.RawMessage `json:"response"`
-	Cached   bool            `json:"cached"`
-	Quota    quota.Info      `json:"quota"`
+	Response json.RawMessage      `json:"response"`
+	Cached   bool                 `json:"cached"`
+	Quota    pocketbase.QuotaInfo `json:"quota"`
 }
 
 type errResp struct {
-	Error string     `json:"error"`
-	Code  string     `json:"code"`
-	Quota *quota.Info `json:"quota,omitempty"`
+	Error string               `json:"error"`
+	Code  string               `json:"code"`
+	Quota *pocketbase.QuotaInfo `json:"quota,omitempty"`
 }
 
-// controlCharsRe matches non-printable ASCII except \t and \n.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 var controlCharsRe = regexp.MustCompile(`[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+`)
 
 func (h *Handler) sanitize(msg string) string {
@@ -58,8 +61,8 @@ func (h *Handler) sanitize(msg string) string {
 	return msg
 }
 
-// ensureJSON returns a valid JSON value. If the content is already JSON, it is
-// returned as-is; otherwise it is wrapped in {"text": "..."}.
+// ensureJSON возвращает валидный JSON: если ответ уже JSON — возвращает as-is,
+// иначе оборачивает в {"text": "..."}.
 func ensureJSON(content string) json.RawMessage {
 	content = strings.TrimSpace(content)
 	if json.Valid([]byte(content)) {
@@ -68,6 +71,8 @@ func ensureJSON(content string) json.RawMessage {
 	wrapped, _ := json.Marshal(map[string]string{"text": content})
 	return wrapped
 }
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 func (h *Handler) Chat(c *gin.Context) {
 	var req ChatRequest
@@ -88,24 +93,44 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Cached responses bypass quota — we're not hitting GigaChat.
-	if cached, ok := h.c.Get(msg); ok {
-		c.JSON(http.StatusOK, ChatResponse{
-			Response: cached,
-			Cached:   true,
-			Quota:    h.q.Info(req.UserID),
+	// Находим токен в PocketBase.
+	tokenRec, err := h.pb.FindToken(req.Token)
+	if err != nil {
+		if errors.Is(err, pocketbase.ErrTokenNotFound) {
+			c.JSON(http.StatusUnauthorized, errResp{
+				Error: "invalid token",
+				Code:  "INVALID_TOKEN",
+			})
+			return
+		}
+		log.Printf("pb find token error: %v", err)
+		c.JSON(http.StatusInternalServerError, errResp{
+			Error: "internal error",
+			Code:  "INTERNAL_ERROR",
 		})
 		return
 	}
 
-	if err := h.q.Check(req.UserID); err != nil {
+	// Кэшированные ответы не считаются за запрос к GigaChat — квоту не тратим.
+	if cached, ok := h.c.Get(msg); ok {
+		qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+		c.JSON(http.StatusOK, ChatResponse{
+			Response: cached,
+			Cached:   true,
+			Quota:    qi,
+		})
+		return
+	}
+
+	// Проверяем квоту.
+	qi, err := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	if err != nil {
 		code := "QUOTA_EXCEEDED"
-		if errors.Is(err, quota.ErrRateLimitMinute) {
+		if errors.Is(err, pocketbase.ErrRateLimitMinute) {
 			code = "RATE_LIMIT_MINUTE"
-		} else if errors.Is(err, quota.ErrRateLimitDay) {
+		} else if errors.Is(err, pocketbase.ErrRateLimitDay) {
 			code = "RATE_LIMIT_DAY"
 		}
-		qi := h.q.Info(req.UserID)
 		c.JSON(http.StatusTooManyRequests, errResp{
 			Error: err.Error(),
 			Code:  code,
@@ -114,11 +139,11 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
+	// Запрос к GigaChat.
 	messages := []gigachat.Message{
 		{Role: "system", Content: h.cfg.SystemPrompt},
 		{Role: "user", Content: msg},
 	}
-
 	gcResp, err := h.gc.Chat(messages)
 	if err != nil {
 		if errors.Is(err, gigachat.ErrTooManyRequests) {
@@ -144,8 +169,10 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	if err := h.q.Consume(req.UserID); err != nil {
-		log.Printf("quota consume error for %s: %v", req.UserID, err)
+	// Списываем квоту в PocketBase.
+	qi, err = h.pb.ConsumeQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	if err != nil {
+		log.Printf("pb consume quota error for token %s: %v", tokenRec.ID, err)
 	}
 
 	responseJSON := ensureJSON(gcResp.Choices[0].Message.Content)
@@ -157,17 +184,27 @@ func (h *Handler) Chat(c *gin.Context) {
 	c.JSON(http.StatusOK, ChatResponse{
 		Response: responseJSON,
 		Cached:   false,
-		Quota:    h.q.Info(req.UserID),
+		Quota:    qi,
 	})
 }
 
 func (h *Handler) GetQuota(c *gin.Context) {
-	userID := c.Param("user_id")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, errResp{Error: "user_id required", Code: "INVALID_REQUEST"})
+	token := c.Param("token")
+	if token == "" {
+		c.JSON(http.StatusBadRequest, errResp{Error: "token required", Code: "INVALID_REQUEST"})
 		return
 	}
-	c.JSON(http.StatusOK, h.q.Info(userID))
+	tokenRec, err := h.pb.FindToken(token)
+	if err != nil {
+		if errors.Is(err, pocketbase.ErrTokenNotFound) {
+			c.JSON(http.StatusNotFound, errResp{Error: "token not found", Code: "INVALID_TOKEN"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, errResp{Error: "internal error", Code: "INTERNAL_ERROR"})
+		return
+	}
+	qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	c.JSON(http.StatusOK, qi)
 }
 
 func (h *Handler) Health(c *gin.Context) {

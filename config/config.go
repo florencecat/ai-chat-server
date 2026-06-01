@@ -25,6 +25,10 @@ type Config struct {
 
 	QuotaPerMinute int
 	QuotaPerDay    int
+
+	PBUrl           string
+	PBAdminEmail    string
+	PBAdminPassword string
 }
 
 func Load() *Config {
@@ -44,6 +48,10 @@ func Load() *Config {
 		DBPath:         getEnv("DB_PATH", "data/ai-server.db"),
 		QuotaPerMinute: getEnvInt("QUOTA_PER_MINUTE", 1),
 		QuotaPerDay:    getEnvInt("QUOTA_PER_DAY", 15),
+
+		PBUrl:           getEnv("PB_URL", "http://127.0.0.1:8090"),
+		PBAdminEmail:    getEnv("PB_ADMIN_EMAIL", ""),
+		PBAdminPassword: getEnv("PB_ADMIN_PASSWORD", ""),
 	}
 }
 

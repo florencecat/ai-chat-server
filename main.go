@@ -8,18 +8,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"github.com/joho/godotenv"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	bolt "go.etcd.io/bbolt"
 
 	"ai-server/cache"
 	"ai-server/config"
 	"ai-server/gigachat"
 	"ai-server/handlers"
-	"ai-server/quota"
+	"ai-server/pocketbase"
 )
 
 func main() {
@@ -28,6 +28,9 @@ func main() {
 
 	if cfg.GigaChatClientID == "" || cfg.GigaChatClientSecret == "" {
 		log.Fatal("GIGACHAT_CLIENT_ID and GIGACHAT_CLIENT_SECRET must be set")
+	}
+	if cfg.PBAdminEmail == "" || cfg.PBAdminPassword == "" {
+		log.Fatal("PB_ADMIN_EMAIL and PB_ADMIN_PASSWORD must be set")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
@@ -45,13 +48,9 @@ func main() {
 		log.Fatalf("init cache: %v", err)
 	}
 
-	quotaManager, err := quota.New(db, cfg.QuotaPerMinute, cfg.QuotaPerDay)
-	if err != nil {
-		log.Fatalf("init quota: %v", err)
-	}
-
+	pbClient := pocketbase.NewClient(cfg)
 	gcClient := gigachat.NewClient(cfg)
-	h := handlers.New(gcClient, cacheStore, quotaManager, cfg)
+	h := handlers.New(gcClient, cacheStore, pbClient, cfg)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -59,7 +58,7 @@ func main() {
 
 	r.GET("/health", h.Health)
 	r.POST("/chat", h.Chat)
-	r.GET("/quota/:user_id", h.GetQuota)
+	r.GET("/quota/:token", h.GetQuota)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
