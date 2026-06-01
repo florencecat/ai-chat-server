@@ -1,3 +1,5 @@
 ai-server
 data/
 .env
+*.exe
+.codegraph
