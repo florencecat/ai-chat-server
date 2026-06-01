@@ -58,12 +58,8 @@ func main() {
 	r.Use(gin.Logger(), gin.Recovery())
 
 	r.GET("/health", h.Health)
-
-	api := r.Group("/api")
-	{
-		api.POST("/chat", h.Chat)
-		api.GET("/quota/:user_id", h.GetQuota)
-	}
+	r.POST("/chat", h.Chat)
+	r.GET("/quota/:user_id", h.GetQuota)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
