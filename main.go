@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"github.com/joho/godotenv"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 )
 
 func main() {
+	_ = godotenv.Load()
 	cfg := config.Load()
 
 	if cfg.GigaChatClientID == "" || cfg.GigaChatClientSecret == "" {
