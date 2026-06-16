@@ -58,7 +58,7 @@ func main() {
 
 	r.GET("/health", h.Health)
 	r.POST("/chat", h.Chat)
-	r.GET("/quota/:token", h.GetQuota)
+	r.GET("/quota", h.GetQuota)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

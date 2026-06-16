@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrTokenNotFound   = errors.New("token not found")
+	ErrUnauthorized    = errors.New("invalid or expired auth token")
 	ErrRateLimitMinute = errors.New("rate limit: only 1 request per minute allowed")
 	ErrRateLimitDay    = errors.New("daily quota exceeded")
 )
@@ -103,16 +104,50 @@ func (c *Client) refreshAdminToken() (string, error) {
 	return c.adminToken, nil
 }
 
-// ── Token lookup ──────────────────────────────────────────────────────────────
+// ── User auth verification + token lookup ─────────────────────────────────────
 
-// FindToken ищет запись tokens по значению поля token.
-func (c *Client) FindToken(tokenValue string) (*TokenRecord, error) {
+// VerifyUser проверяет PocketBase user JWT через auth-refresh и возвращает user ID.
+func (c *Client) VerifyUser(userAuthToken string) (string, error) {
+	req, _ := http.NewRequest("POST",
+		c.cfg.PBUrl+"/api/collections/users/auth-refresh",
+		nil)
+	req.Header.Set("Authorization", userAuthToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("pb auth-refresh: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", ErrUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pb auth-refresh: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Record struct {
+			ID string `json:"id"`
+		} `json:"record"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("pb auth-refresh decode: %w", err)
+	}
+	if result.Record.ID == "" {
+		return "", ErrUnauthorized
+	}
+	return result.Record.ID, nil
+}
+
+// FindTokenByUser ищет запись tokens по user ID (поле profile).
+func (c *Client) FindTokenByUser(userID string) (*TokenRecord, error) {
 	adminToken, err := c.getAdminToken()
 	if err != nil {
 		return nil, err
 	}
 
-	filter := url.QueryEscape("(token='" + tokenValue + "')")
+	filter := url.QueryEscape("(profile='" + userID + "')")
 	req, _ := http.NewRequest("GET",
 		c.cfg.PBUrl+"/api/collections/tokens/records?filter="+filter+"&perPage=1",
 		nil)

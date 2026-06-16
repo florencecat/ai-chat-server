@@ -31,7 +31,6 @@ func New(gc *gigachat.Client, c *cache.Cache, pb *pocketbase.Client, cfg *config
 // ── Request / Response types ──────────────────────────────────────────────────
 
 type ChatRequest struct {
-	Token   string `json:"token"   binding:"required"`
 	Message string `json:"message" binding:"required"`
 }
 
@@ -42,8 +41,8 @@ type ChatResponse struct {
 }
 
 type errResp struct {
-	Error string               `json:"error"`
-	Code  string               `json:"code"`
+	Error string                `json:"error"`
+	Code  string                `json:"code"`
 	Quota *pocketbase.QuotaInfo `json:"quota,omitempty"`
 }
 
@@ -61,8 +60,6 @@ func (h *Handler) sanitize(msg string) string {
 	return msg
 }
 
-// ensureJSON возвращает валидный JSON: если ответ уже JSON — возвращает as-is,
-// иначе оборачивает в {"text": "..."}.
 func ensureJSON(content string) json.RawMessage {
 	content = strings.TrimSpace(content)
 	if json.Valid([]byte(content)) {
@@ -70,6 +67,63 @@ func ensureJSON(content string) json.RawMessage {
 	}
 	wrapped, _ := json.Marshal(map[string]string{"text": content})
 	return wrapped
+}
+
+// bearerToken извлекает токен из заголовка Authorization: Bearer <token>.
+func bearerToken(c *gin.Context) string {
+	h := c.GetHeader("Authorization")
+	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
+		return strings.TrimSpace(after)
+	}
+	return ""
+}
+
+// resolveTokenRecord верифицирует PB user JWT и находит связанную запись tokens.
+func (h *Handler) resolveTokenRecord(c *gin.Context) (*pocketbase.TokenRecord, bool) {
+	authToken := bearerToken(c)
+	if authToken == "" {
+		c.JSON(http.StatusUnauthorized, errResp{
+			Error: "Authorization header required",
+			Code:  "MISSING_AUTH",
+		})
+		return nil, false
+	}
+
+	userID, err := h.pb.VerifyUser(authToken)
+	if err != nil {
+		if errors.Is(err, pocketbase.ErrUnauthorized) {
+			c.JSON(http.StatusUnauthorized, errResp{
+				Error: "invalid or expired token",
+				Code:  "UNAUTHORIZED",
+			})
+			return nil, false
+		}
+		log.Printf("pb verify user error: %v", err)
+		c.JSON(http.StatusInternalServerError, errResp{
+			Error: "internal error",
+			Code:  "INTERNAL_ERROR",
+		})
+		return nil, false
+	}
+
+	tokenRec, err := h.pb.FindTokenByUser(userID)
+	if err != nil {
+		if errors.Is(err, pocketbase.ErrTokenNotFound) {
+			c.JSON(http.StatusForbidden, errResp{
+				Error: "no token record found for this user",
+				Code:  "TOKEN_NOT_FOUND",
+			})
+			return nil, false
+		}
+		log.Printf("pb find token error: %v", err)
+		c.JSON(http.StatusInternalServerError, errResp{
+			Error: "internal error",
+			Code:  "INTERNAL_ERROR",
+		})
+		return nil, false
+	}
+
+	return tokenRec, true
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -93,32 +147,15 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Находим токен в PocketBase.
-	tokenRec, err := h.pb.FindToken(req.Token)
-	if err != nil {
-		if errors.Is(err, pocketbase.ErrTokenNotFound) {
-			c.JSON(http.StatusUnauthorized, errResp{
-				Error: "invalid token",
-				Code:  "INVALID_TOKEN",
-			})
-			return
-		}
-		log.Printf("pb find token error: %v", err)
-		c.JSON(http.StatusInternalServerError, errResp{
-			Error: "internal error",
-			Code:  "INTERNAL_ERROR",
-		})
+	tokenRec, ok := h.resolveTokenRecord(c)
+	if !ok {
 		return
 	}
 
-	// Кэшированные ответы не считаются за запрос к GigaChat — квоту не тратим.
+	// Кэш — не тратим квоту, GigaChat не вызываем.
 	if cached, ok := h.c.Get(msg); ok {
 		qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
-		c.JSON(http.StatusOK, ChatResponse{
-			Response: cached,
-			Cached:   true,
-			Quota:    qi,
-		})
+		c.JSON(http.StatusOK, ChatResponse{Response: cached, Cached: true, Quota: qi})
 		return
 	}
 
@@ -131,11 +168,7 @@ func (h *Handler) Chat(c *gin.Context) {
 		} else if errors.Is(err, pocketbase.ErrRateLimitDay) {
 			code = "RATE_LIMIT_DAY"
 		}
-		c.JSON(http.StatusTooManyRequests, errResp{
-			Error: err.Error(),
-			Code:  code,
-			Quota: &qi,
-		})
+		c.JSON(http.StatusTooManyRequests, errResp{Error: err.Error(), Code: code, Quota: &qi})
 		return
 	}
 
@@ -169,38 +202,23 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Списываем квоту в PocketBase.
+	// Списываем квоту.
 	qi, err = h.pb.ConsumeQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
 	if err != nil {
 		log.Printf("pb consume quota error for token %s: %v", tokenRec.ID, err)
 	}
 
 	responseJSON := ensureJSON(gcResp.Choices[0].Message.Content)
-
 	if err := h.c.Set(msg, responseJSON); err != nil {
 		log.Printf("cache set error: %v", err)
 	}
 
-	c.JSON(http.StatusOK, ChatResponse{
-		Response: responseJSON,
-		Cached:   false,
-		Quota:    qi,
-	})
+	c.JSON(http.StatusOK, ChatResponse{Response: responseJSON, Cached: false, Quota: qi})
 }
 
 func (h *Handler) GetQuota(c *gin.Context) {
-	token := c.Param("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, errResp{Error: "token required", Code: "INVALID_REQUEST"})
-		return
-	}
-	tokenRec, err := h.pb.FindToken(token)
-	if err != nil {
-		if errors.Is(err, pocketbase.ErrTokenNotFound) {
-			c.JSON(http.StatusNotFound, errResp{Error: "token not found", Code: "INVALID_TOKEN"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, errResp{Error: "internal error", Code: "INTERNAL_ERROR"})
+	tokenRec, ok := h.resolveTokenRecord(c)
+	if !ok {
 		return
 	}
 	qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
