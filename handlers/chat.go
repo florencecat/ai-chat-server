@@ -72,8 +72,9 @@ func ensureJSON(content string) json.RawMessage {
 // bearerToken извлекает токен из заголовка Authorization: Bearer <token>.
 func bearerToken(c *gin.Context) string {
 	h := c.GetHeader("Authorization")
-	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
-		return strings.TrimSpace(after)
+	const prefix = "Bearer "
+	if strings.HasPrefix(h, prefix) {
+		return strings.TrimSpace(h[len(prefix):])
 	}
 	return ""
 }
