@@ -26,8 +26,8 @@ func main() {
 	_ = godotenv.Load()
 	cfg := config.Load()
 
-	if cfg.GigaChatClientID == "" || cfg.GigaChatClientSecret == "" {
-		log.Fatal("GIGACHAT_CLIENT_ID and GIGACHAT_CLIENT_SECRET must be set")
+	if cfg.GigaChatAuthKey == "" && (cfg.GigaChatClientID == "" || cfg.GigaChatClientSecret == "") {
+		log.Fatal("set GIGACHAT_AUTH_KEY or both GIGACHAT_CLIENT_ID and GIGACHAT_CLIENT_SECRET")
 	}
 	if cfg.PBAdminEmail == "" || cfg.PBAdminPassword == "" {
 		log.Fatal("PB_ADMIN_EMAIL and PB_ADMIN_PASSWORD must be set")

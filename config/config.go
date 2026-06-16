@@ -13,6 +13,7 @@ type Config struct {
 	GigaChatBaseURL      string
 	GigaChatClientID     string
 	GigaChatClientSecret string
+	GigaChatAuthKey      string // готовая Base64-строка «Авторизационные данные» из ЛК
 	GigaChatScope        string
 	GigaChatModel        string
 	GigaChatSkipTLS      bool
@@ -38,6 +39,7 @@ func Load() *Config {
 		GigaChatBaseURL:      getEnv("GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"),
 		GigaChatClientID:     getEnv("GIGACHAT_CLIENT_ID", ""),
 		GigaChatClientSecret: getEnv("GIGACHAT_CLIENT_SECRET", ""),
+		GigaChatAuthKey:      getEnv("GIGACHAT_AUTH_KEY", ""),
 		GigaChatScope:        getEnv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
 		GigaChatModel:        getEnv("GIGACHAT_MODEL", "GigaChat"),
 		GigaChatSkipTLS:      getEnvBool("GIGACHAT_SKIP_TLS", true),

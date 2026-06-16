@@ -76,9 +76,12 @@ func (c *Client) refreshToken() (string, error) {
 		return "", fmt.Errorf("create auth request: %w", err)
 	}
 
-	authStr := base64.StdEncoding.EncodeToString(
-		[]byte(c.cfg.GigaChatClientID + ":" + c.cfg.GigaChatClientSecret),
-	)
+	authStr := c.cfg.GigaChatAuthKey
+	if authStr == "" {
+		authStr = base64.StdEncoding.EncodeToString(
+			[]byte(c.cfg.GigaChatClientID + ":" + c.cfg.GigaChatClientSecret),
+		)
+	}
 	req.Header.Set("Authorization", "Basic "+authStr)
 	req.Header.Set("RqUID", newUUID())
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
