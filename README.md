@@ -1,4 +1,6 @@
-# ai-chat-server
+# ai-chat-server 
+
+[![Build & Deploy](https://github.com/florencecat/ai-chat-server/actions/workflows/deploy.yml/badge.svg)](https://github.com/florencecat/ai-chat-server/actions/workflows/deploy.yml)
 
 HTTP-сервис на Go, который проксирует запросы к [GigaChat API](https://developers.sber.ru/portal/products/gigachat-api) от Сбера. Принимает сообщения от клиента, проверяет аутентификацию и квоты пользователя через [PocketBase](https://pocketbase.io/), кеширует ответы и отдаёт результат языковой модели.
 
