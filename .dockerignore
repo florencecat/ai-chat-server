@@ -1,0 +1,10 @@
+.git
+.github
+.codegraph
+.claude
+data/
+.env
+*.exe
+ai-server
+README.md
+Makefile

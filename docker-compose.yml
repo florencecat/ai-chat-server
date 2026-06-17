@@ -1,0 +1,10 @@
+services:
+  ai-server:
+    image: ghcr.io/${GITHUB_REPOSITORY:-tonkovkd/ai-chat-server}:latest
+    container_name: ai-server
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8091:8091"
