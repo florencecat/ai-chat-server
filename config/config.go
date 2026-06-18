@@ -43,8 +43,7 @@ func Load() *Config {
 		GigaChatScope:        getEnv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
 		GigaChatModel:        getEnv("GIGACHAT_MODEL", "GigaChat"),
 		GigaChatSkipTLS:      getEnvBool("GIGACHAT_SKIP_TLS", true),
-		SystemPrompt: getEnv("SYSTEM_PROMPT",
-			"Ты — полезный ассистент. Отвечай строго в формате JSON. Никакого текста вне JSON-объекта."),
+		SystemPrompt: loadSystemPrompt(),
 		MaxMessageLen:  getEnvInt("MAX_MESSAGE_LEN", 4000),
 		CacheTTL:       getEnvDuration("CACHE_TTL", "1h"),
 		DBPath:         getEnv("DB_PATH", "data/ai-server.db"),
@@ -55,6 +54,18 @@ func Load() *Config {
 		PBAdminEmail:    getEnv("PB_ADMIN_EMAIL", ""),
 		PBAdminPassword: getEnv("PB_ADMIN_PASSWORD", ""),
 	}
+}
+
+// loadSystemPrompt возвращает системный промт. Приоритет:
+// 1) файл из SYSTEM_PROMPT_FILE, 2) переменная SYSTEM_PROMPT, 3) дефолт.
+func loadSystemPrompt() string {
+	const fallback = "Ты — полезный ассистент. Отвечай строго в формате JSON. Никакого текста вне JSON-объекта."
+	if path := os.Getenv("SYSTEM_PROMPT_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return string(data)
+		}
+	}
+	return getEnv("SYSTEM_PROMPT", fallback)
 }
 
 func getEnv(key, fallback string) string {

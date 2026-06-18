@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -61,12 +62,24 @@ func (h *Handler) sanitize(msg string) string {
 }
 
 func ensureJSON(content string) json.RawMessage {
-	content = strings.TrimSpace(content)
+	content = stripCodeFence(strings.TrimSpace(content))
 	if json.Valid([]byte(content)) {
 		return json.RawMessage(content)
 	}
 	wrapped, _ := json.Marshal(map[string]string{"text": content})
 	return wrapped
+}
+
+// stripCodeFence срезает markdown-обёртку ```json ... ``` вокруг ответа модели.
+func stripCodeFence(s string) string {
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
 }
 
 // bearerToken извлекает токен из заголовка Authorization: Bearer <token>.
@@ -173,9 +186,15 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Запрос к GigaChat.
+	// Запрос к GigaChat. Подставляем текущее время, чтобы модель могла
+	// переводить относительные даты («завтра») в абсолютные.
+	systemPrompt := strings.ReplaceAll(
+		h.cfg.SystemPrompt,
+		"{{CURRENT_TIME}}",
+		time.Now().Format(time.RFC3339),
+	)
 	messages := []gigachat.Message{
-		{Role: "system", Content: h.cfg.SystemPrompt},
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: msg},
 	}
 	gcResp, err := h.gc.Chat(messages)
