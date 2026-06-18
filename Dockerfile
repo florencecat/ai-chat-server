@@ -15,6 +15,7 @@ RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /app/ai-server .
+COPY --from=builder /app/prompts ./prompts
 
 EXPOSE 8091
 CMD ["./ai-server"]
