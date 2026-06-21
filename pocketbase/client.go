@@ -107,11 +107,12 @@ func (c *Client) refreshAdminToken() (string, error) {
 // ── User auth verification + token lookup ─────────────────────────────────────
 
 // VerifyUser проверяет PocketBase user JWT через auth-refresh и возвращает user ID.
+// userAuthToken — голый токен (без "Bearer ").
 func (c *Client) VerifyUser(userAuthToken string) (string, error) {
 	req, _ := http.NewRequest("POST",
 		c.cfg.PBUrl+"/api/collections/users/auth-refresh",
 		nil)
-	req.Header.Set("Authorization", userAuthToken)
+	req.Header.Set("Authorization", "Bearer "+userAuthToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -147,11 +148,15 @@ func (c *Client) FindTokenByUser(userID string) (*TokenRecord, error) {
 		return nil, err
 	}
 
-	filter := url.QueryEscape("(profile='" + userID + "')")
-	req, _ := http.NewRequest("GET",
-		c.cfg.PBUrl+"/api/collections/tokens/records?filter="+filter+"&perPage=1",
-		nil)
-	req.Header.Set("Authorization", adminToken)
+	// Строим URL через url.Values, чтобы избежать двойного кодирования.
+	endpoint, _ := url.Parse(c.cfg.PBUrl + "/api/collections/tokens/records")
+	q := endpoint.Query()
+	q.Set("filter", "(profile='"+userID+"')")
+	q.Set("perPage", "1")
+	endpoint.RawQuery = q.Encode()
+
+	req, _ := http.NewRequest("GET", endpoint.String(), nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -254,7 +259,7 @@ func (c *Client) ConsumeQuota(rec *TokenRecord, perMinute, perDay int) (QuotaInf
 	req, _ := http.NewRequest("PATCH",
 		c.cfg.PBUrl+"/api/collections/tokens/records/"+rec.ID,
 		bytes.NewReader(body))
-	req.Header.Set("Authorization", adminToken)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
