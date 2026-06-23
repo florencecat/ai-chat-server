@@ -2,12 +2,14 @@ package pocketbase
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,9 +101,33 @@ func (c *Client) refreshAdminToken() (string, error) {
 	}
 
 	c.adminToken = result.Token
-	// Токены суперадмина живут 7 дней, обновляем за сутки до истечения.
-	c.tokenExp = time.Now().Add(6 * 24 * time.Hour)
+	// Берём реальный срок жизни из JWT (PB-настройка authToken.duration),
+	// с буфером 60с. Если распарсить не вышло — консервативный фоллбэк.
+	if exp, ok := jwtExpiry(result.Token); ok {
+		c.tokenExp = exp.Add(-60 * time.Second)
+	} else {
+		c.tokenExp = time.Now().Add(30 * time.Minute)
+	}
 	return c.adminToken, nil
+}
+
+// jwtExpiry достаёт claim "exp" из JWT без проверки подписи.
+func jwtExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
 }
 
 // ── User auth verification + token lookup ─────────────────────────────────────
