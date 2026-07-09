@@ -17,8 +17,8 @@ import (
 
 	"ai-server/cache"
 	"ai-server/config"
-	"ai-server/gigachat"
 	"ai-server/handlers"
+	"ai-server/llm"
 	"ai-server/pocketbase"
 )
 
@@ -26,12 +26,15 @@ func main() {
 	_ = godotenv.Load()
 	cfg := config.Load()
 
-	if cfg.GigaChatAuthKey == "" && (cfg.GigaChatClientID == "" || cfg.GigaChatClientSecret == "") {
-		log.Fatal("set GIGACHAT_AUTH_KEY or both GIGACHAT_CLIENT_ID and GIGACHAT_CLIENT_SECRET")
-	}
 	if cfg.PBAdminEmail == "" || cfg.PBAdminPassword == "" {
 		log.Fatal("PB_ADMIN_EMAIL and PB_ADMIN_PASSWORD must be set")
 	}
+
+	llmProvider, err := llm.New(cfg)
+	if err != nil {
+		log.Fatalf("init llm provider: %v", err)
+	}
+	log.Printf("llm provider: %s", llmProvider.Name())
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
 		log.Fatalf("create data dir: %v", err)
@@ -49,8 +52,7 @@ func main() {
 	}
 
 	pbClient := pocketbase.NewClient(cfg)
-	gcClient := gigachat.NewClient(cfg)
-	h := handlers.New(gcClient, cacheStore, pbClient, cfg)
+	h := handlers.New(llmProvider, cacheStore, pbClient, cfg)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

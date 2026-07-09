@@ -9,6 +9,8 @@ import (
 type Config struct {
 	Port string
 
+	LLMProvider string // "gigachat" | "yandex"
+
 	GigaChatAuthURL      string
 	GigaChatBaseURL      string
 	GigaChatClientID     string
@@ -17,6 +19,12 @@ type Config struct {
 	GigaChatScope        string
 	GigaChatModel        string
 	GigaChatSkipTLS      bool
+
+	YandexFolderID    string
+	YandexAPIKey      string
+	YandexModel       string
+	YandexTemperature float64
+	YandexMaxTokens   int
 
 	SystemPrompt  string
 	MaxMessageLen int
@@ -35,6 +43,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:                 getEnv("PORT", "8080"),
+		LLMProvider:          getEnv("LLM_PROVIDER", "gigachat"),
 		GigaChatAuthURL:      getEnv("GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
 		GigaChatBaseURL:      getEnv("GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"),
 		GigaChatClientID:     getEnv("GIGACHAT_CLIENT_ID", ""),
@@ -43,6 +52,13 @@ func Load() *Config {
 		GigaChatScope:        getEnv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
 		GigaChatModel:        getEnv("GIGACHAT_MODEL", "GigaChat"),
 		GigaChatSkipTLS:      getEnvBool("GIGACHAT_SKIP_TLS", true),
+
+		YandexFolderID:    getEnv("YANDEX_FOLDER_ID", ""),
+		YandexAPIKey:      getEnv("YANDEX_API_KEY", ""),
+		YandexModel:       getEnv("YANDEX_MODEL", "yandexgpt-lite/latest"),
+		YandexTemperature: getEnvFloat("YANDEX_TEMPERATURE", 0.25),
+		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 500),
+
 		SystemPrompt: loadSystemPrompt(),
 		MaxMessageLen:  getEnvInt("MAX_MESSAGE_LEN", 4000),
 		CacheTTL:       getEnvDuration("CACHE_TTL", "1h"),
@@ -79,6 +95,15 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback

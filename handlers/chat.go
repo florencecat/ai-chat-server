@@ -14,19 +14,19 @@ import (
 
 	"ai-server/cache"
 	"ai-server/config"
-	"ai-server/gigachat"
+	"ai-server/llm"
 	"ai-server/pocketbase"
 )
 
 type Handler struct {
-	gc  *gigachat.Client
+	llm llm.Provider
 	c   *cache.Cache
 	pb  *pocketbase.Client
 	cfg *config.Config
 }
 
-func New(gc *gigachat.Client, c *cache.Cache, pb *pocketbase.Client, cfg *config.Config) *Handler {
-	return &Handler{gc: gc, c: c, pb: pb, cfg: cfg}
+func New(provider llm.Provider, c *cache.Cache, pb *pocketbase.Client, cfg *config.Config) *Handler {
+	return &Handler{llm: provider, c: c, pb: pb, cfg: cfg}
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -186,37 +186,33 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Запрос к GigaChat. Подставляем текущее время, чтобы модель могла
+	// Запрос к модели. Подставляем текущее время, чтобы модель могла
 	// переводить относительные даты («завтра») в абсолютные.
 	systemPrompt := strings.ReplaceAll(
 		h.cfg.SystemPrompt,
 		"{{CURRENT_TIME}}",
 		time.Now().Format(time.RFC3339),
 	)
-	messages := []gigachat.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: msg},
-	}
-	gcResp, err := h.gc.Chat(messages)
+	content, err := h.llm.Chat(systemPrompt, msg)
 	if err != nil {
-		if errors.Is(err, gigachat.ErrTooManyRequests) {
+		if errors.Is(err, llm.ErrTooManyRequests) {
 			c.JSON(http.StatusServiceUnavailable, errResp{
 				Error: "upstream rate limit reached, try again later",
 				Code:  "UPSTREAM_RATE_LIMIT",
 			})
 			return
 		}
-		log.Printf("gigachat error: %v", err)
+		log.Printf("llm error: %v", err)
 		c.JSON(http.StatusInternalServerError, errResp{
-			Error: "gigachat error: " + err.Error(),
-			Code:  "GIGACHAT_ERROR",
+			Error: "llm error: " + err.Error(),
+			Code:  "LLM_ERROR",
 		})
 		return
 	}
 
-	if len(gcResp.Choices) == 0 {
+	if strings.TrimSpace(content) == "" {
 		c.JSON(http.StatusInternalServerError, errResp{
-			Error: "no choices in gigachat response",
+			Error: "empty response from model",
 			Code:  "EMPTY_RESPONSE",
 		})
 		return
@@ -228,7 +224,7 @@ func (h *Handler) Chat(c *gin.Context) {
 		log.Printf("pb consume quota error for token %s: %v", tokenRec.ID, err)
 	}
 
-	responseJSON := ensureJSON(gcResp.Choices[0].Message.Content)
+	responseJSON := ensureJSON(content)
 	if err := h.c.Set(msg, responseJSON); err != nil {
 		log.Printf("cache set error: %v", err)
 	}
