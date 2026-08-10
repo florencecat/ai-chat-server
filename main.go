@@ -17,9 +17,11 @@ import (
 
 	"ai-server/cache"
 	"ai-server/config"
+	"ai-server/entitlement"
 	"ai-server/handlers"
 	"ai-server/llm"
 	"ai-server/pocketbase"
+	"ai-server/rustore"
 )
 
 func main() {
@@ -52,7 +54,46 @@ func main() {
 	}
 
 	pbClient := pocketbase.NewClient(cfg)
-	h := handlers.New(llmProvider, cacheStore, pbClient, cfg)
+
+	// RuStore-интеграция необязательна: без неё сервер работает, все
+	// пользователи остаются на бесплатном тарифе, а /verify отвечает 503.
+	ruClient, err := rustore.NewClient(cfg)
+	if err != nil {
+		log.Fatalf("init rustore client: %v", err)
+	}
+	if ruClient == nil {
+		log.Print("rustore: verification disabled (RUSTORE_ENABLED is not set)")
+	} else {
+		log.Printf("rustore: enabled (sandbox=%v, products=%v)", cfg.RuStoreSandbox, ruClient.SubscriptionIDs())
+	}
+
+	plans := entitlement.Plans{
+		Free: entitlement.Plan{
+			Tier:           entitlement.TierFree,
+			Model:          cfg.ModelFree,
+			QuotaPerDay:    cfg.QuotaPerDay,
+			QuotaPerMinute: cfg.QuotaPerMinute,
+		},
+		Premium: entitlement.Plan{
+			Tier:           entitlement.TierPremium,
+			Model:          cfg.ModelPremium,
+			QuotaPerDay:    cfg.QuotaPerDayPremium,
+			QuotaPerMinute: cfg.QuotaPerMinutePremium,
+		},
+	}
+	entService := entitlement.NewService(pbClient, ruClient, plans, cfg.EntitlementGrace)
+
+	var notificationKey []byte
+	if cfg.RuStoreNotificationKey != "" {
+		notificationKey, err = rustore.ParseNotificationKey(cfg.RuStoreNotificationKey)
+		if err != nil {
+			log.Fatalf("rustore notification key: %v", err)
+		}
+	} else {
+		log.Print("rustore: webhook disabled (RUSTORE_NOTIFICATION_KEY is not set)")
+	}
+
+	h := handlers.New(llmProvider, cacheStore, pbClient, cfg, entService, notificationKey)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -61,6 +102,9 @@ func main() {
 	r.GET("/health", h.Health)
 	r.POST("/chat", h.Chat)
 	r.GET("/quota", h.GetQuota)
+	r.GET("/entitlement", h.GetEntitlement)
+	r.POST("/verify", h.VerifyPurchase)
+	r.POST(cfg.RuStoreWebhookPath, h.RuStoreWebhook)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

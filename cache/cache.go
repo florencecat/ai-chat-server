@@ -31,15 +31,17 @@ func New(db *bolt.DB, ttl time.Duration) (*Cache, error) {
 	return &Cache{db: db, ttl: ttl}, nil
 }
 
-func (c *Cache) key(message string) []byte {
-	h := sha256.Sum256([]byte(message))
+// key разделяет кэш по namespace (имени модели): ответ улучшенной модели не
+// должен приезжать бесплатному пользователю и наоборот.
+func (c *Cache) key(namespace, message string) []byte {
+	h := sha256.Sum256([]byte(namespace + "\x00" + message))
 	return []byte(fmt.Sprintf("%x", h))
 }
 
-func (c *Cache) Get(message string) (json.RawMessage, bool) {
+func (c *Cache) Get(namespace, message string) (json.RawMessage, bool) {
 	var result json.RawMessage
 	_ = c.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket(bucket).Get(c.key(message))
+		v := tx.Bucket(bucket).Get(c.key(namespace, message))
 		if v == nil {
 			return nil
 		}
@@ -56,13 +58,13 @@ func (c *Cache) Get(message string) (json.RawMessage, bool) {
 	return result, result != nil
 }
 
-func (c *Cache) Set(message string, value json.RawMessage) error {
+func (c *Cache) Set(namespace, message string, value json.RawMessage) error {
 	e := entry{Value: value, ExpiresAt: time.Now().Add(c.ttl).UnixNano()}
 	data, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
 	return c.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucket).Put(c.key(message), data)
+		return tx.Bucket(bucket).Put(c.key(namespace, message), data)
 	})
 }

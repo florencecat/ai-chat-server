@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"ai-server/config"
@@ -51,9 +52,22 @@ func (r yandexResponse) text() string {
 	return ""
 }
 
-func (p *yandexProvider) Chat(systemPrompt, userInput string) (string, error) {
+// modelURI приводит имя модели к виду gpt://<folder>/<model>. Готовый URI
+// (уже с gpt://) пропускается как есть — так в MODEL_PREMIUM можно указать
+// модель из чужого каталога.
+func (p *yandexProvider) modelURI(model string) string {
+	if model == "" {
+		model = p.cfg.YandexModel
+	}
+	if strings.HasPrefix(model, "gpt://") {
+		return model
+	}
+	return fmt.Sprintf("gpt://%s/%s", p.cfg.YandexFolderID, model)
+}
+
+func (p *yandexProvider) Chat(model, systemPrompt, userInput string) (string, error) {
 	reqData := yandexRequest{
-		Model:           fmt.Sprintf("gpt://%s/%s", p.cfg.YandexFolderID, p.cfg.YandexModel),
+		Model:           p.modelURI(model),
 		Temperature:     p.cfg.YandexTemperature,
 		Instructions:    systemPrompt,
 		Input:           userInput,

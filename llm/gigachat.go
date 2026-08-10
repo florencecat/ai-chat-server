@@ -19,12 +19,12 @@ func newGigaChat(cfg *config.Config) *gigaChatProvider {
 
 func (p *gigaChatProvider) Name() string { return "gigachat" }
 
-func (p *gigaChatProvider) Chat(systemPrompt, userInput string) (string, error) {
+func (p *gigaChatProvider) Chat(model, systemPrompt, userInput string) (string, error) {
 	messages := []gigachat.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userInput},
 	}
-	resp, err := p.client.Chat(messages)
+	resp, err := p.client.Chat(model, messages)
 	if err != nil {
 		if errors.Is(err, gigachat.ErrTooManyRequests) {
 			return "", ErrTooManyRequests

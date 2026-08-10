@@ -114,13 +114,18 @@ func (c *Client) refreshToken() (string, error) {
 }
 
 // Chat sends messages to GigaChat. Retries once on 401 (stale token).
-func (c *Client) Chat(messages []Message) (*ChatResponse, error) {
+// An empty model falls back to GIGACHAT_MODEL from the config.
+func (c *Client) Chat(model string, messages []Message) (*ChatResponse, error) {
+	if model == "" {
+		model = c.cfg.GigaChatModel
+	}
+
 	token, err := c.getToken()
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
 
-	resp, status, body, err := c.doChat(token, messages)
+	resp, status, body, err := c.doChat(token, model, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +137,7 @@ func (c *Client) Chat(messages []Message) (*ChatResponse, error) {
 		if err != nil {
 			return nil, fmt.Errorf("refresh token: %w", err)
 		}
-		resp, status, body, err = c.doChat(token, messages)
+		resp, status, body, err = c.doChat(token, model, messages)
 		if err != nil {
 			return nil, err
 		}
@@ -148,9 +153,9 @@ func (c *Client) Chat(messages []Message) (*ChatResponse, error) {
 	return resp, nil
 }
 
-func (c *Client) doChat(token string, messages []Message) (*ChatResponse, int, []byte, error) {
+func (c *Client) doChat(token, model string, messages []Message) (*ChatResponse, int, []byte, error) {
 	chatReq := ChatRequest{
-		Model:    c.cfg.GigaChatModel,
+		Model:    model,
 		Messages: messages,
 		Stream:   false,
 	}

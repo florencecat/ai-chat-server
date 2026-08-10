@@ -12,10 +12,13 @@ import (
 // ErrTooManyRequests — единый признак rate-limit со стороны провайдера.
 var ErrTooManyRequests = errors.New("llm: too many requests")
 
-// Provider — единый интерфейс к LLM. Принимает системный промт и сообщение
-// пользователя, возвращает текст ответа модели.
+// Provider — единый интерфейс к LLM. Принимает имя модели, системный промт и
+// сообщение пользователя, возвращает текст ответа модели.
+//
+// model выбирается по тарифу пользователя (базовая/улучшенная); пустая строка
+// означает модель провайдера по умолчанию из конфигурации.
 type Provider interface {
-	Chat(systemPrompt, userInput string) (string, error)
+	Chat(model, systemPrompt, userInput string) (string, error)
 	Name() string
 }
 

@@ -14,19 +14,29 @@ import (
 
 	"ai-server/cache"
 	"ai-server/config"
+	"ai-server/entitlement"
 	"ai-server/llm"
 	"ai-server/pocketbase"
 )
 
 type Handler struct {
-	llm llm.Provider
-	c   *cache.Cache
-	pb  *pocketbase.Client
-	cfg *config.Config
+	llm  llm.Provider
+	c    *cache.Cache
+	pb   *pocketbase.Client
+	cfg  *config.Config
+	ent  *entitlement.Service
+	nKey []byte // ключ расшифровки вебхуков RuStore; nil — вебхук выключен
 }
 
-func New(provider llm.Provider, c *cache.Cache, pb *pocketbase.Client, cfg *config.Config) *Handler {
-	return &Handler{llm: provider, c: c, pb: pb, cfg: cfg}
+func New(
+	provider llm.Provider,
+	c *cache.Cache,
+	pb *pocketbase.Client,
+	cfg *config.Config,
+	ent *entitlement.Service,
+	notificationKey []byte,
+) *Handler {
+	return &Handler{llm: provider, c: c, pb: pb, cfg: cfg, ent: ent, nKey: notificationKey}
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -39,6 +49,9 @@ type ChatResponse struct {
 	Response json.RawMessage      `json:"response"`
 	Cached   bool                 `json:"cached"`
 	Quota    pocketbase.QuotaInfo `json:"quota"`
+	// Tier — по какому тарифу обслужен запрос: клиенту это нужно, чтобы
+	// показать, что премиум уже применился.
+	Tier entitlement.Tier `json:"tier"`
 }
 
 type errResp struct {
@@ -92,15 +105,16 @@ func bearerToken(c *gin.Context) string {
 	return ""
 }
 
-// resolveTokenRecord верифицирует PB user JWT и находит связанную запись tokens.
-func (h *Handler) resolveTokenRecord(c *gin.Context) (*pocketbase.TokenRecord, bool) {
+// resolveUser верифицирует PB user JWT и возвращает id пользователя.
+// При ошибке сам пишет ответ и возвращает false.
+func (h *Handler) resolveUser(c *gin.Context) (string, bool) {
 	authToken := bearerToken(c)
 	if authToken == "" {
 		c.JSON(http.StatusUnauthorized, errResp{
 			Error: "Authorization header required",
 			Code:  "MISSING_AUTH",
 		})
-		return nil, false
+		return "", false
 	}
 
 	userID, err := h.pb.VerifyUser(authToken)
@@ -110,14 +124,23 @@ func (h *Handler) resolveTokenRecord(c *gin.Context) (*pocketbase.TokenRecord, b
 				Error: "invalid or expired token",
 				Code:  "UNAUTHORIZED",
 			})
-			return nil, false
+			return "", false
 		}
 		log.Printf("pb verify user error: %v", err)
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "internal error",
 			Code:  "INTERNAL_ERROR",
 		})
-		return nil, false
+		return "", false
+	}
+	return userID, true
+}
+
+// resolveTokenRecord верифицирует PB user JWT и находит связанную запись tokens.
+func (h *Handler) resolveTokenRecord(c *gin.Context) (string, *pocketbase.TokenRecord, bool) {
+	userID, ok := h.resolveUser(c)
+	if !ok {
+		return "", nil, false
 	}
 
 	tokenRec, err := h.pb.FindTokenByUser(userID)
@@ -127,17 +150,17 @@ func (h *Handler) resolveTokenRecord(c *gin.Context) (*pocketbase.TokenRecord, b
 				Error: "no token record found for this user",
 				Code:  "TOKEN_NOT_FOUND",
 			})
-			return nil, false
+			return "", nil, false
 		}
 		log.Printf("pb find token error: %v", err)
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "internal error",
 			Code:  "INTERNAL_ERROR",
 		})
-		return nil, false
+		return "", nil, false
 	}
 
-	return tokenRec, true
+	return userID, tokenRec, true
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -161,20 +184,26 @@ func (h *Handler) Chat(c *gin.Context) {
 		return
 	}
 
-	tokenRec, ok := h.resolveTokenRecord(c)
+	userID, tokenRec, ok := h.resolveTokenRecord(c)
 	if !ok {
 		return
 	}
 
-	// Кэш — не тратим квоту, GigaChat не вызываем.
-	if cached, ok := h.c.Get(msg); ok {
-		qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
-		c.JSON(http.StatusOK, ChatResponse{Response: cached, Cached: true, Quota: qi})
+	// Права читаются из кэша в PocketBase (без похода в RuStore) — это
+	// горячий путь. Тариф решает и модель, и дневной лимит.
+	ent := h.ent.Current(userID)
+	plan := h.ent.Plans().For(ent.Tier)
+
+	// Кэш — не тратим квоту, модель не вызываем. Разделён по модели, чтобы
+	// ответ улучшенной модели не утёк бесплатному пользователю.
+	if cached, ok := h.c.Get(plan.Model, msg); ok {
+		qi, _ := h.pb.CheckQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
+		c.JSON(http.StatusOK, ChatResponse{Response: cached, Cached: true, Quota: qi, Tier: ent.Tier})
 		return
 	}
 
 	// Проверяем квоту.
-	qi, err := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	qi, err := h.pb.CheckQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
 	if err != nil {
 		code := "QUOTA_EXCEEDED"
 		if errors.Is(err, pocketbase.ErrRateLimitMinute) {
@@ -193,7 +222,7 @@ func (h *Handler) Chat(c *gin.Context) {
 		"{{CURRENT_TIME}}",
 		time.Now().Format(time.RFC3339),
 	)
-	content, err := h.llm.Chat(systemPrompt, msg)
+	content, err := h.llm.Chat(plan.Model, systemPrompt, msg)
 	if err != nil {
 		if errors.Is(err, llm.ErrTooManyRequests) {
 			c.JSON(http.StatusServiceUnavailable, errResp{
@@ -219,25 +248,26 @@ func (h *Handler) Chat(c *gin.Context) {
 	}
 
 	// Списываем квоту.
-	qi, err = h.pb.ConsumeQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	qi, err = h.pb.ConsumeQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
 	if err != nil {
 		log.Printf("pb consume quota error for token %s: %v", tokenRec.ID, err)
 	}
 
 	responseJSON := ensureJSON(content)
-	if err := h.c.Set(msg, responseJSON); err != nil {
+	if err := h.c.Set(plan.Model, msg, responseJSON); err != nil {
 		log.Printf("cache set error: %v", err)
 	}
 
-	c.JSON(http.StatusOK, ChatResponse{Response: responseJSON, Cached: false, Quota: qi})
+	c.JSON(http.StatusOK, ChatResponse{Response: responseJSON, Cached: false, Quota: qi, Tier: ent.Tier})
 }
 
 func (h *Handler) GetQuota(c *gin.Context) {
-	tokenRec, ok := h.resolveTokenRecord(c)
+	userID, tokenRec, ok := h.resolveTokenRecord(c)
 	if !ok {
 		return
 	}
-	qi, _ := h.pb.CheckQuota(tokenRec, h.cfg.QuotaPerMinute, h.cfg.QuotaPerDay)
+	plan := h.ent.Plans().For(h.ent.Current(userID).Tier)
+	qi, _ := h.pb.CheckQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
 	c.JSON(http.StatusOK, qi)
 }
 

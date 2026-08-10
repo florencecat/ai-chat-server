@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -32,12 +33,37 @@ type Config struct {
 	CacheTTL time.Duration
 	DBPath   string
 
+	// Квоты бесплатного тарифа. Исторические имена QUOTA_PER_MINUTE /
+	// QUOTA_PER_DAY сохранены — премиум задаётся отдельной парой переменных.
 	QuotaPerMinute int
 	QuotaPerDay    int
+
+	QuotaPerMinutePremium int
+	QuotaPerDayPremium    int
+
+	// Модели по тарифам: пустая строка — модель провайдера по умолчанию.
+	ModelFree    string
+	ModelPremium string
+
+	// EntitlementGrace — сколько ещё действует премиум после expiry.
+	// Страховка от опоздавшего вебхука о продлении.
+	EntitlementGrace time.Duration
 
 	PBUrl           string
 	PBAdminEmail    string
 	PBAdminPassword string
+
+	// ── RuStore Public API ────────────────────────────────────────────────
+	RuStoreEnabled         bool
+	RuStoreAPIURL          string
+	RuStoreKeyID           string
+	RuStorePrivateKey      string // PEM либо base64(PEM)
+	RuStorePackageName     string
+	RuStoreAppID           string
+	RuStoreSubscriptionIDs []string
+	RuStoreSandbox         bool
+	RuStoreNotificationKey string
+	RuStoreWebhookPath     string
 }
 
 func Load() *Config {
@@ -59,17 +85,47 @@ func Load() *Config {
 		YandexTemperature: getEnvFloat("YANDEX_TEMPERATURE", 0.25),
 		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 500),
 
-		SystemPrompt: loadSystemPrompt(),
+		SystemPrompt:   loadSystemPrompt(),
 		MaxMessageLen:  getEnvInt("MAX_MESSAGE_LEN", 4000),
 		CacheTTL:       getEnvDuration("CACHE_TTL", "1h"),
 		DBPath:         getEnv("DB_PATH", "data/ai-server.db"),
 		QuotaPerMinute: getEnvInt("QUOTA_PER_MINUTE", 1),
 		QuotaPerDay:    getEnvInt("QUOTA_PER_DAY", 15),
 
+		QuotaPerMinutePremium: getEnvInt("QUOTA_PER_MINUTE_PREMIUM", getEnvInt("QUOTA_PER_MINUTE", 1)),
+		QuotaPerDayPremium:    getEnvInt("QUOTA_PER_DAY_PREMIUM", 200),
+
+		ModelFree:    getEnv("MODEL_FREE", ""),
+		ModelPremium: getEnv("MODEL_PREMIUM", ""),
+
+		EntitlementGrace: getEnvDuration("ENTITLEMENT_GRACE", "24h"),
+
 		PBUrl:           getEnv("PB_URL", "http://127.0.0.1:8090"),
 		PBAdminEmail:    getEnv("PB_ADMIN_EMAIL", ""),
 		PBAdminPassword: getEnv("PB_ADMIN_PASSWORD", ""),
+
+		RuStoreEnabled:         getEnvBool("RUSTORE_ENABLED", false),
+		RuStoreAPIURL:          strings.TrimRight(getEnv("RUSTORE_API_URL", "https://public-api.rustore.ru"), "/"),
+		RuStoreKeyID:           getEnv("RUSTORE_KEY_ID", ""),
+		RuStorePrivateKey:      loadRuStorePrivateKey(),
+		RuStorePackageName:     getEnv("RUSTORE_PACKAGE_NAME", ""),
+		RuStoreAppID:           getEnv("RUSTORE_APP_ID", ""),
+		RuStoreSubscriptionIDs: getEnvList("RUSTORE_SUBSCRIPTION_IDS"),
+		RuStoreSandbox:         getEnvBool("RUSTORE_SANDBOX", false),
+		RuStoreNotificationKey: getEnv("RUSTORE_NOTIFICATION_KEY", ""),
+		RuStoreWebhookPath:     getEnv("RUSTORE_WEBHOOK_PATH", "/rustore/webhook"),
 	}
+}
+
+// loadRuStorePrivateKey возвращает приватный RSA-ключ сервисного доступа.
+// Приоритет у файла: многострочный PEM неудобно держать в переменной окружения.
+func loadRuStorePrivateKey() string {
+	if path := os.Getenv("RUSTORE_PRIVATE_KEY_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return string(data)
+		}
+	}
+	return getEnv("RUSTORE_PRIVATE_KEY", "")
 }
 
 // loadSystemPrompt возвращает системный промт. Приоритет:
@@ -89,6 +145,21 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvList читает список значений через запятую, отбрасывая пустые элементы.
+func getEnvList(key string) []string {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {
