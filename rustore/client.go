@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,30 +99,41 @@ func NewClient(cfg *config.Config) (*Client, error) {
 // SubscriptionIDs — коды подписок, с которыми работает приложение.
 func (c *Client) SubscriptionIDs() []string { return c.subscriptionIDs }
 
-// parsePrivateKey читает RSA-ключ из PEM (PKCS#1 или PKCS#8). Допускается,
-// что ключ передан в env одной строкой в base64 — так его удобнее хранить в
-// секретах CI.
+// parsePrivateKey читает RSA-ключ в PKCS#1 или PKCS#8. Принимается PEM,
+// «голый» DER в base64 (в таком виде ключ отдаёт консоль RuStore) и base64
+// от целого PEM — так его удобнее хранить одной строкой в секретах CI.
 func parsePrivateKey(raw string) (*rsa.PrivateKey, error) {
 	if raw == "" {
 		return nil, errors.New("RUSTORE_PRIVATE_KEY (or RUSTORE_PRIVATE_KEY_FILE) must be set")
 	}
-	data := []byte(raw)
-	if block, _ := pem.Decode(data); block == nil {
-		decoded, err := base64.StdEncoding.DecodeString(raw)
+
+	var der []byte
+	if block, _ := pem.Decode([]byte(raw)); block != nil {
+		der = block.Bytes
+	} else {
+		// Переносы строк и пробелы в base64 не значимы, но мешают декодеру.
+		compact := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, raw)
+		decoded, err := base64.StdEncoding.DecodeString(compact)
 		if err != nil {
-			return nil, errors.New("rustore private key: expected PEM or base64-encoded PEM")
+			return nil, errors.New("rustore private key: expected PEM or base64-encoded key")
 		}
-		data = decoded
+		// Ключ мог быть закодирован целиком вместе с PEM-обёрткой.
+		if block, _ := pem.Decode(decoded); block != nil {
+			der = block.Bytes
+		} else {
+			der = decoded
+		}
 	}
 
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, errors.New("rustore private key: no PEM block found")
-	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
 		return key, nil
 	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
 		return nil, fmt.Errorf("rustore private key: %w", err)
 	}
