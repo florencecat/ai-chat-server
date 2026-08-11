@@ -8,5 +8,6 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      - ./secrets:/app/secrets:ro
     ports:
       - "127.0.0.1:8091:8091"

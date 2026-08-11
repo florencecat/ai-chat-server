@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -121,9 +122,11 @@ func Load() *Config {
 // Приоритет у файла: многострочный PEM неудобно держать в переменной окружения.
 func loadRuStorePrivateKey() string {
 	if path := os.Getenv("RUSTORE_PRIVATE_KEY_FILE"); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
+		data, err := os.ReadFile(path)
+		if err == nil {
 			return string(data)
 		}
+		log.Printf("read RUSTORE_PRIVATE_KEY_FILE %q: %v", path, err)
 	}
 	return getEnv("RUSTORE_PRIVATE_KEY", "")
 }
