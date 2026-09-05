@@ -24,7 +24,7 @@ Flutter / клиент
 │              ai-chat-server              │
 │                                          │
 │  1. Верификация JWT      ──────► PocketBase (auth-refresh)
-│  2. Поиск записи tokens  ──────► PocketBase (по profile = user.id)
+│  2. Поиск/создание tokens ─────► PocketBase (по profile = user.id)
 │  3. Проверка квоты                       │
 │  4. Кеш (BoltDB) ─── hit ──► ответ       │
 │  5. Запрос к модели      ──────► GigaChat API
@@ -180,7 +180,7 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 | 400  | `INVALID_PAYLOAD`          | Вебхук: payload не расшифровался               |
 | 401  | `MISSING_AUTH`             | Нет заголовка `Authorization`                  |
 | 401  | `UNAUTHORIZED`             | Невалидный или истёкший JWT                    |
-| 403  | `TOKEN_NOT_FOUND`          | Для пользователя нет записи в `tokens`         |
+| 403  | `TOKEN_NOT_FOUND`          | Записи в `tokens` нет и её не удалось создать  |
 | 404  | `PURCHASE_NOT_FOUND`       | RuStore не знает такой `purchaseId`            |
 | 409  | `PURCHASE_NOT_CONFIRMED`   | Покупка найдена, но не оплачена                |
 | 409  | `PURCHASE_ALREADY_CLAIMED` | `purchaseId` уже привязан к другому аккаунту   |
@@ -254,10 +254,18 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 - **`users`** (тип `auth`) — пользователи, аутентификация по email/паролю.
 - **`tokens`** (тип `base`) — связь с пользователем и счётчики квот:
   - `profile` (relation → `users`) — владелец;
+  - `token` (text) — случайное значение, сервер заполняет его при создании записи;
   - `total_requests`, `day_requests`, `day_reset_date`, `last_request_date` — учёт квот.
 - **`entitlements`** (тип `base`) — права доступа, по одной записи на пользователя.
 
-Запись в `tokens` нужно создавать при регистрации пользователя (например, через хук PocketBase на событие `users.create`). Запись в `entitlements` создаёт сам сервер при первой верификации покупки.
+Обе записи сервер заводит сам: `tokens` — при первом запросе пользователя
+(`/chat` или `/quota`), `entitlements` — при первой верификации покупки. Хук
+PocketBase на `users.create` больше не нужен, но и не мешает: если запись уже
+есть, сервер её просто использует.
+
+На `profile` желательно повесить уникальный индекс: он страхует от гонки, если
+сервер запущен в нескольких репликах и два первых запроса пользователя пришли
+одновременно (внутри одного процесса создание уже сериализовано).
 
 ### Коллекция `entitlements`
 

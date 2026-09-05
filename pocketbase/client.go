@@ -2,7 +2,9 @@ package pocketbase
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,7 +179,7 @@ func (c *Client) FindTokenByUser(userID string) (*TokenRecord, error) {
 	// Строим URL через url.Values, чтобы избежать двойного кодирования.
 	endpoint, _ := url.Parse(c.cfg.PBUrl + "/api/collections/tokens/records")
 	q := endpoint.Query()
-	q.Set("filter", "(profile='"+userID+"')")
+	q.Set("filter", "(profile='"+escapePBFilter(userID)+"')")
 	q.Set("perPage", "1")
 	endpoint.RawQuery = q.Encode()
 
@@ -189,6 +191,13 @@ func (c *Client) FindTokenByUser(userID string) (*TokenRecord, error) {
 		return nil, fmt.Errorf("pb find token: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Отличать «записи нет» от ошибки PocketBase важно: на ErrTokenNotFound
+	// вызывающий код заводит новую запись.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("pb find token: status %d: %s", resp.StatusCode, body)
+	}
 
 	var result struct {
 		Items []TokenRecord `json:"items"`
@@ -310,4 +319,101 @@ func (c *Client) effectiveDayRequests(rec *TokenRecord, today time.Time) int {
 		return 0 // новый день, счётчик ещё не сброшен
 	}
 	return int(rec.DayRequests)
+}
+
+// ── Автосоздание записи tokens ────────────────────────────────────────────────
+
+// tokenMu сериализует автосоздание записи tokens: между «не нашли» и
+// «создали» есть гонка — два параллельных запроса нового пользователя иначе
+// заведут ему две строки с разными счётчиками.
+var tokenMu sync.Mutex
+
+// EnsureTokenByUser возвращает запись tokens пользователя, создавая её при
+// первом обращении. Раньше строку заводили в PocketBase руками, и до этого
+// любой запрос нового пользователя падал с TOKEN_NOT_FOUND.
+func (c *Client) EnsureTokenByUser(userID string) (*TokenRecord, error) {
+	rec, err := c.FindTokenByUser(userID)
+	if err == nil {
+		return rec, nil
+	}
+	if !errors.Is(err, ErrTokenNotFound) {
+		return nil, err
+	}
+
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+
+	// Пока ждали блокировку, запись мог создать параллельный запрос.
+	rec, err = c.FindTokenByUser(userID)
+	if err == nil {
+		return rec, nil
+	}
+	if !errors.Is(err, ErrTokenNotFound) {
+		return nil, err
+	}
+
+	return c.createTokenRecord(userID)
+}
+
+// createTokenRecord заводит нулевую запись квот для пользователя.
+func (c *Client) createTokenRecord(userID string) (*TokenRecord, error) {
+	adminToken, err := c.getAdminToken()
+	if err != nil {
+		return nil, err
+	}
+
+	// last_request_date не заполняем: пустое значение означает «запросов ещё
+	// не было», и минутный кулдаун не срабатывает на первом обращении.
+	payload := map[string]any{
+		"profile":        userID,
+		"token":          newTokenValue(),
+		"total_requests": 0,
+		"day_requests":   0,
+		"day_reset_date": todayUTC().Format(pbTimeLayout),
+	}
+
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost,
+		c.cfg.PBUrl+"/api/collections/tokens/records",
+		bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pb create token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		// 400 — в том числе нарушение уникального индекса по profile:
+		// запись мог создать другой инстанс сервера. Тогда она уже есть.
+		if resp.StatusCode == http.StatusBadRequest {
+			if rec, findErr := c.FindTokenByUser(userID); findErr == nil {
+				return rec, nil
+			}
+		}
+		return nil, fmt.Errorf("pb create token: status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var rec TokenRecord
+	if err := json.NewDecoder(resp.Body).Decode(&rec); err != nil {
+		return nil, fmt.Errorf("pb create token decode: %w", err)
+	}
+	if rec.ID == "" {
+		return nil, errors.New("pb create token: empty record id returned")
+	}
+	return &rec, nil
+}
+
+// newTokenValue генерирует значение поля token. Логика сервера его не
+// использует, но поле может быть обязательным/уникальным в схеме коллекции.
+func newTokenValue() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// Источник энтропии недоступен — не повод отказывать пользователю.
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
 }

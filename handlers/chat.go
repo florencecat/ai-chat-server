@@ -136,14 +136,15 @@ func (h *Handler) resolveUser(c *gin.Context) (string, bool) {
 	return userID, true
 }
 
-// resolveTokenRecord верифицирует PB user JWT и находит связанную запись tokens.
+// resolveTokenRecord верифицирует PB user JWT и находит связанную запись tokens,
+// создавая её при первом обращении пользователя.
 func (h *Handler) resolveTokenRecord(c *gin.Context) (string, *pocketbase.TokenRecord, bool) {
 	userID, ok := h.resolveUser(c)
 	if !ok {
 		return "", nil, false
 	}
 
-	tokenRec, err := h.pb.FindTokenByUser(userID)
+	tokenRec, err := h.pb.EnsureTokenByUser(userID)
 	if err != nil {
 		if errors.Is(err, pocketbase.ErrTokenNotFound) {
 			c.JSON(http.StatusForbidden, errResp{
@@ -152,7 +153,7 @@ func (h *Handler) resolveTokenRecord(c *gin.Context) (string, *pocketbase.TokenR
 			})
 			return "", nil, false
 		}
-		log.Printf("pb find token error: %v", err)
+		log.Printf("pb ensure token error for user %s: %v", userID, err)
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "internal error",
 			Code:  "INTERNAL_ERROR",
