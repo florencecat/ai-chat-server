@@ -27,9 +27,37 @@ type Config struct {
 	YandexModel       string
 	YandexTemperature float64
 	YandexMaxTokens   int
+	// YandexStructured — посылать ли response_format.json_schema. Строгую
+	// схему поддерживают не все модели (нужна yandexgpt/rc и новее), поэтому
+	// выключатель вынесен в конфигурацию.
+	YandexStructured bool
 
-	SystemPrompt  string
+	SystemPrompt string
+	// SystemPromptV2 — промт для /v2/chat: подмножество разметки, entries,
+	// urgency, местное время пользователя.
+	SystemPromptV2 string
+	// PromptVersion попадает в ключ кэша и в тело ответа: без него после
+	// правки промта пользователи ещё CACHE_TTL получают старые ответы.
+	PromptVersion string
+	// MarkupEnabled включает блок о разметке в промте v1. По умолчанию
+	// выключено: установленные сборки без markdown-рендера показали бы
+	// звёздочки текстом. В v2 разметка включена всегда.
+	MarkupEnabled bool
+
 	MaxMessageLen int
+	// MaxHistoryMessages / MaxHistoryChars ограничивают историю диалога
+	// отдельно от лимита на само сообщение пользователя.
+	MaxHistoryMessages int
+	MaxHistoryChars    int
+
+	// FormatMarkup / FormatPlain подставляются в промт вместо {{FORMAT}}.
+	// Держатся файлами, а не константами, чтобы правка разметки не требовала
+	// пересборки образа.
+	FormatMarkup string
+	FormatPlain  string
+
+	// RedFlagsPath — YAML со списком маркеров, поднимающих urgency.
+	RedFlagsPath string
 
 	CacheTTL time.Duration
 	DBPath   string
@@ -70,7 +98,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:                 getEnv("PORT", "8080"),
-		LLMProvider:          getEnv("LLM_PROVIDER", "gigachat"),
+		LLMProvider:          getEnv("LLM_PROVIDER", "yandex"),
 		GigaChatAuthURL:      getEnv("GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
 		GigaChatBaseURL:      getEnv("GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"),
 		GigaChatClientID:     getEnv("GIGACHAT_CLIENT_ID", ""),
@@ -84,10 +112,21 @@ func Load() *Config {
 		YandexAPIKey:      getEnv("YANDEX_API_KEY", ""),
 		YandexModel:       getEnv("YANDEX_MODEL", "yandexgpt-lite/latest"),
 		YandexTemperature: getEnvFloat("YANDEX_TEMPERATURE", 0.25),
-		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 500),
+		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 700),
+		YandexStructured:  getEnvBool("YANDEX_STRUCTURED_OUTPUT", true),
 
 		SystemPrompt:   loadSystemPrompt(),
-		MaxMessageLen:  getEnvInt("MAX_MESSAGE_LEN", 4000),
+		SystemPromptV2: loadSystemPromptV2(),
+		PromptVersion:  getEnv("PROMPT_VERSION", "v1"),
+		MarkupEnabled:  getEnvBool("MARKUP_ENABLED", false),
+
+		MaxMessageLen:      getEnvInt("MAX_MESSAGE_LEN", 4000),
+		MaxHistoryMessages: getEnvInt("MAX_HISTORY_MESSAGES", 10),
+		MaxHistoryChars:    getEnvInt("MAX_HISTORY_CHARS", 8000),
+		FormatMarkup:       loadFile(getEnv("FORMAT_MARKUP_FILE", "prompts/format_markup.txt")),
+		FormatPlain:        loadFile(getEnv("FORMAT_PLAIN_FILE", "prompts/format_plain.txt")),
+		RedFlagsPath:       getEnv("RED_FLAGS_FILE", "prompts/red-flags.yaml"),
+
 		CacheTTL:       getEnvDuration("CACHE_TTL", "1h"),
 		DBPath:         getEnv("DB_PATH", "data/ai-server.db"),
 		QuotaPerMinute: getEnvInt("QUOTA_PER_MINUTE", 1),
@@ -133,14 +172,56 @@ func loadRuStorePrivateKey() string {
 
 // loadSystemPrompt возвращает системный промт. Приоритет:
 // 1) файл из SYSTEM_PROMPT_FILE, 2) переменная SYSTEM_PROMPT, 3) дефолт.
+//
+// Источник пишется в лог: если в окружении остался старый однострочный
+// SYSTEM_PROMPT, он перекроет prompts/system.txt, и правки промта не
+// применятся — по логу это видно сразу, иначе пришлось бы гадать.
 func loadSystemPrompt() string {
 	const fallback = "Ты — полезный ассистент. Отвечай строго в формате JSON. Никакого текста вне JSON-объекта."
 	if path := os.Getenv("SYSTEM_PROMPT_FILE"); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
+			log.Printf("config: system prompt from %s (%d bytes)", path, len(data))
+			return string(data)
+		} else {
+			log.Printf("config: SYSTEM_PROMPT_FILE %q not read: %v", path, err)
+		}
+	}
+	if v := os.Getenv("SYSTEM_PROMPT"); v != "" {
+		log.Printf("config: system prompt from SYSTEM_PROMPT env (%d bytes); "+
+			"prompts/system.txt is NOT used", len(v))
+		return v
+	}
+	log.Print("config: system prompt is the built-in fallback")
+	return fallback
+}
+
+// loadSystemPromptV2 возвращает промт для /v2/chat. Приоритет:
+// 1) файл из SYSTEM_PROMPT_V2_FILE, 2) prompts/system_v2.txt, 3) промт v1.
+// Падать из-за отсутствующего файла нельзя: v1 должен работать в любом случае.
+func loadSystemPromptV2() string {
+	paths := []string{os.Getenv("SYSTEM_PROMPT_V2_FILE"), "prompts/system_v2.txt"}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if data, err := os.ReadFile(path); err == nil {
+			log.Printf("config: v2 system prompt from %s (%d bytes)", path, len(data))
 			return string(data)
 		}
 	}
-	return getEnv("SYSTEM_PROMPT", fallback)
+	log.Print("config: prompts/system_v2.txt not found, /v2/chat falls back to the v1 prompt")
+	return loadSystemPrompt()
+}
+
+// loadFile читает необязательный кусок промта. Отсутствие файла — не ошибка:
+// в промте на его месте окажется пустая строка.
+func loadFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("config: optional prompt file %q not loaded: %v", path, err)
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func getEnv(key, fallback string) string {

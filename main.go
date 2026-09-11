@@ -10,11 +10,15 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	// tzdata вшивается в бинарник: образ на alpine без пакета tzdata, а
+	// time.LoadLocation нужен, чтобы понимать «Europe/Moscow» от клиента.
+	_ "time/tzdata"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	bolt "go.etcd.io/bbolt"
 
+	"ai-server/advice"
 	"ai-server/cache"
 	"ai-server/config"
 	"ai-server/entitlement"
@@ -36,7 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("init llm provider: %v", err)
 	}
-	log.Printf("llm provider: %s", llmProvider.Name())
+	log.Printf("llm provider: %s (structured output: %v)", llmProvider.Name(), llmProvider.SupportsSchema())
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
 		log.Fatalf("create data dir: %v", err)
@@ -59,9 +63,9 @@ func main() {
 	// пользователи остаются на бесплатном тарифе, а /verify отвечает 503.
 	ruClient, err := rustore.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("init rustore client: %v", err)
-	}
-	if ruClient == nil {
+		log.Printf("rustore: verification disabled, init failed: %v", err)
+		ruClient = nil
+	} else if ruClient == nil {
 		log.Print("rustore: verification disabled (RUSTORE_ENABLED is not set)")
 	} else {
 		log.Printf("rustore: enabled (sandbox=%v, products=%v)", cfg.RuStoreSandbox, ruClient.SubscriptionIDs())
@@ -93,7 +97,16 @@ func main() {
 		log.Print("rustore: webhook disabled (RUSTORE_NOTIFICATION_KEY is not set)")
 	}
 
-	h := handlers.New(llmProvider, cacheStore, pbClient, cfg, entService, notificationKey)
+	// Красные флаги — страховка от заниженного urgency. Без файла сервер
+	// работает, просто без эскалации, поэтому это не фатальная ошибка.
+	redFlags, err := advice.LoadRedFlags(cfg.RedFlagsPath)
+	if err != nil {
+		log.Printf("red flags: disabled, %v", err)
+		redFlags = &advice.RedFlags{}
+	}
+	log.Printf("red flags: %d markers from %s", redFlags.Len(), cfg.RedFlagsPath)
+
+	h := handlers.New(llmProvider, cacheStore, pbClient, cfg, entService, redFlags, notificationKey)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -101,6 +114,7 @@ func main() {
 
 	r.GET("/health", h.Health)
 	r.POST("/chat", h.Chat)
+	r.POST("/v2/chat", h.ChatV2)
 	r.GET("/quota", h.GetQuota)
 	r.GET("/entitlement", h.GetEntitlement)
 	r.POST("/verify", h.VerifyPurchase)

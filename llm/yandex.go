@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,11 +13,16 @@ import (
 	"ai-server/config"
 )
 
-// yandexProvider — клиент Yandex AI Studio (эндпоинт /v1/responses).
+// yandexProvider — клиент Yandex AI Studio, OpenAI-совместимый эндпоинт
+// /v1/chat/completions. Он выбран вместо /v1/responses по двум причинам:
+// принимает историю диалога массивом сообщений и поддерживает строгую схему
+// ответа через response_format.json_schema.
 type yandexProvider struct {
 	cfg        *config.Config
 	httpClient *http.Client
 }
+
+const yandexChatURL = "https://ai.api.cloud.yandex.net/v1/chat/completions"
 
 func newYandex(cfg *config.Config) *yandexProvider {
 	return &yandexProvider{
@@ -27,29 +33,32 @@ func newYandex(cfg *config.Config) *yandexProvider {
 
 func (p *yandexProvider) Name() string { return "yandex" }
 
+func (p *yandexProvider) SupportsSchema() bool { return p.cfg.YandexStructured }
+
 type yandexRequest struct {
-	Model           string  `json:"model"`
-	Temperature     float64 `json:"temperature"`
-	Instructions    string  `json:"instructions"`
-	Input           string  `json:"input"`
-	MaxOutputTokens int     `json:"max_output_tokens"`
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	Temperature    float64         `json:"temperature"`
+	MaxTokens      int             `json:"max_tokens"`
+	Stream         bool            `json:"stream"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+}
+
+type responseFormat struct {
+	Type       string     `json:"type"`
+	JSONSchema jsonSchema `json:"json_schema"`
+}
+
+type jsonSchema struct {
+	Name   string          `json:"name"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 type yandexResponse struct {
-	Output []struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"output"`
-}
-
-func (r yandexResponse) text() string {
-	for _, o := range r.Output {
-		if len(o.Content) > 0 {
-			return o.Content[0].Text
-		}
-	}
-	return ""
+	Choices []struct {
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
 }
 
 // modelURI приводит имя модели к виду gpt://<folder>/<model>. Готовый URI
@@ -65,49 +74,114 @@ func (p *yandexProvider) modelURI(model string) string {
 	return fmt.Sprintf("gpt://%s/%s", p.cfg.YandexFolderID, model)
 }
 
-func (p *yandexProvider) Chat(model, systemPrompt, userInput string) (string, error) {
+func (p *yandexProvider) Chat(req Request) (string, error) {
+	text, status, body, err := p.do(req, req.JSONSchema)
+	if err != nil {
+		return "", err
+	}
+
+	// Строгую схему поддерживают не все модели каталога. Вместо того чтобы
+	// уронить чат целиком, повторяем запрос без схемы: формат ответа тогда
+	// держится на промте, а лишнее всё равно срежет нормализация.
+	if status == http.StatusBadRequest && req.JSONSchema != nil && mentionsSchema(body) {
+		log.Printf("yandex: model %s rejected response_format, retrying without schema: %s",
+			req.Model, truncate(body, 300))
+		text, status, body, err = p.do(req, nil)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	switch {
+	case status == http.StatusTooManyRequests:
+		return "", ErrTooManyRequests
+	case status != http.StatusOK:
+		return "", fmt.Errorf("yandex failed %d: %s", status, truncate(body, 500))
+	}
+	return text, nil
+}
+
+// do выполняет один запрос. Ошибку возвращает только на уровне транспорта:
+// неуспешный HTTP-статус отдаётся вызывающему вместе с телом, чтобы тот мог
+// решить, повторять ли запрос.
+func (p *yandexProvider) do(req Request, schema json.RawMessage) (text string, status int, body []byte, err error) {
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = p.cfg.YandexMaxTokens
+	}
+
+	messages := make([]Message, 0, len(req.Messages)+1)
+	if req.SystemPrompt != "" {
+		messages = append(messages, Message{Role: "system", Content: req.SystemPrompt})
+	}
+	messages = append(messages, req.Messages...)
+
 	reqData := yandexRequest{
-		Model:           p.modelURI(model),
-		Temperature:     p.cfg.YandexTemperature,
-		Instructions:    systemPrompt,
-		Input:           userInput,
-		MaxOutputTokens: p.cfg.YandexMaxTokens,
+		Model:       p.modelURI(req.Model),
+		Messages:    messages,
+		Temperature: p.cfg.YandexTemperature,
+		MaxTokens:   maxTokens,
+		Stream:      false,
 	}
-	body, err := json.Marshal(reqData)
-	if err != nil {
-		return "", fmt.Errorf("yandex marshal: %w", err)
+	if schema != nil {
+		name := req.SchemaName
+		if name == "" {
+			name = "answer"
+		}
+		reqData.ResponseFormat = &responseFormat{
+			Type:       "json_schema",
+			JSONSchema: jsonSchema{Name: name, Schema: schema},
+		}
 	}
 
-	req, err := http.NewRequest("POST",
-		"https://ai.api.cloud.yandex.net/v1/responses",
-		bytes.NewReader(body))
+	payload, err := json.Marshal(reqData)
 	if err != nil {
-		return "", fmt.Errorf("yandex request: %w", err)
+		return "", 0, nil, fmt.Errorf("yandex marshal: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Api-Key "+p.cfg.YandexAPIKey)
-	req.Header.Set("OpenAI-Project", p.cfg.YandexFolderID)
 
-	resp, err := p.httpClient.Do(req)
+	httpReq, err := http.NewRequest("POST", yandexChatURL, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("yandex do: %w", err)
+		return "", 0, nil, fmt.Errorf("yandex request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Api-Key "+p.cfg.YandexAPIKey)
+	httpReq.Header.Set("OpenAI-Project", p.cfg.YandexFolderID)
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return "", 0, nil, fmt.Errorf("yandex do: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("yandex read: %w", err)
-	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return "", ErrTooManyRequests
+		return "", resp.StatusCode, nil, fmt.Errorf("yandex read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("yandex failed %d: %s", resp.StatusCode, respBody)
+		return "", resp.StatusCode, body, nil
 	}
 
 	var yResp yandexResponse
-	if err := json.Unmarshal(respBody, &yResp); err != nil {
-		return "", fmt.Errorf("yandex parse: %w", err)
+	if err := json.Unmarshal(body, &yResp); err != nil {
+		return "", resp.StatusCode, body, fmt.Errorf("yandex parse: %w", err)
 	}
-	return yResp.text(), nil
+	if len(yResp.Choices) == 0 {
+		return "", resp.StatusCode, body, fmt.Errorf("yandex: empty choices")
+	}
+	return yResp.Choices[0].Message.Content, resp.StatusCode, body, nil
+}
+
+// mentionsSchema отличает «модель не умеет схему» от прочих 400.
+func mentionsSchema(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "response_format") ||
+		strings.Contains(s, "json_schema") ||
+		strings.Contains(s, "structured")
+}
+
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
 }
