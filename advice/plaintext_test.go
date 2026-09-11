@@ -79,10 +79,8 @@ func TestEntryTextFieldsLoseMarkup(t *testing.T) {
 	}
 }
 
-func TestRedFlagsAndQuestionsLoseMarkup(t *testing.T) {
-	a, err := Parse("{\"response\":\"ок\"," +
-		"\"red_flags\":[\"**кровь** в мокроте\",\"\",\"- отказ от воды\"]," +
-		"\"follow_up_questions\":[\"Кашель `сухой` или влажный?\"]}")
+func TestRedFlagsLoseMarkup(t *testing.T) {
+	a, err := Parse(`{"response":"ок","red_flags":["**кровь** в мокроте","","- отказ от воды"]}`)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -94,9 +92,6 @@ func TestRedFlagsAndQuestionsLoseMarkup(t *testing.T) {
 		if a.RedFlags[i] != w {
 			t.Errorf("red_flags[%d] = %q, want %q", i, a.RedFlags[i], w)
 		}
-	}
-	if a.FollowUpQuestions[0] != "Кашель сухой или влажный?" {
-		t.Errorf("question = %q", a.FollowUpQuestions[0])
 	}
 }
 

@@ -117,7 +117,7 @@ func Load() *Config {
 
 		SystemPrompt:   loadSystemPrompt(),
 		SystemPromptV2: loadSystemPromptV2(),
-		PromptVersion:  getEnv("PROMPT_VERSION", "p2"),
+		PromptVersion:  getEnv("PROMPT_VERSION", "p3"),
 		MarkupEnabled:  getEnvBool("MARKUP_ENABLED", false),
 
 		MaxMessageLen:      getEnvInt("MAX_MESSAGE_LEN", 4000),

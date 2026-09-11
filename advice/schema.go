@@ -26,7 +26,7 @@ import "encoding/json"
 const schemaJSON = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["response", "events", "entries", "urgency", "red_flags", "follow_up_questions"],
+  "required": ["response", "events", "entries", "urgency", "red_flags"],
   "properties": {
     "response": {
       "type": "string",
@@ -85,11 +85,6 @@ const schemaJSON = `{
       "type": "array",
       "items": {"type": "string"},
       "description": "Тревожные признаки, при которых нужно к врачу немедленно, не больше пяти. Пустой список, если их нет."
-    },
-    "follow_up_questions": {
-      "type": "array",
-      "items": {"type": "string"},
-      "description": "Уточняющие вопросы пользователю, не больше трёх. Пустой список, если вопросов нет."
     }
   }
 }`

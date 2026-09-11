@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -166,17 +167,28 @@ func TestUnknownUrgencyBecomesMonitor(t *testing.T) {
 }
 
 func TestListsAreCleanedAndClamped(t *testing.T) {
-	a, err := Parse(`{"response":"ок",
-		"red_flags":["a","","b","c","d","e","f"],
-		"follow_up_questions":["1","2","3","4"]}`)
+	a, err := Parse(`{"response":"ок","red_flags":["a","","b","c","d","e","f"]}`)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	if len(a.RedFlags) != MaxRedFlags {
 		t.Errorf("len(RedFlags) = %d, want %d", len(a.RedFlags), MaxRedFlags)
 	}
-	if len(a.FollowUpQuestions) != MaxFollowUpQuestions {
-		t.Errorf("len(FollowUpQuestions) = %d, want %d", len(a.FollowUpQuestions), MaxFollowUpQuestions)
+}
+
+// От follow_up_questions отказались: поле не в схеме, и присланное моделью
+// значение не должно доехать до клиента.
+func TestFollowUpQuestionsAreDropped(t *testing.T) {
+	a, err := Parse(`{"response":"ок","follow_up_questions":["Кашель сухой?"]}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(got), "follow_up") {
+		t.Errorf("Marshal = %s, want без follow_up_questions", got)
 	}
 }
 

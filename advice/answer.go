@@ -26,25 +26,22 @@ var (
 
 // Лимиты карточек под ответом. Три карточки — уже полэкрана.
 const (
-	MaxEvents            = 3
-	MaxEntries           = 5
-	MaxRedFlags          = 5
-	MaxFollowUpQuestions = 3
+	MaxEvents   = 3
+	MaxEntries  = 5
+	MaxRedFlags = 5
 )
 
 // Answer — ответ ассистента в том виде, в котором он уезжает клиенту.
 //
-// Поля Фазы 4 (Urgency / RedFlags / FollowUpQuestions) опущены при отсутствии:
-// клиент различает «метаданных нет» и «уровень неизвестен», и подменять
-// первое вторым нельзя.
+// Пустые Urgency и RedFlags опускаются: клиент различает «метаданных нет» и
+// «уровень неизвестен», и подменять первое вторым нельзя.
 type Answer struct {
 	Response string  `json:"response"`
 	Events   []Event `json:"events"`
 	Entries  []Entry `json:"entries,omitempty"`
 
-	Urgency           string   `json:"urgency,omitempty"`
-	RedFlags          []string `json:"red_flags,omitempty"`
-	FollowUpQuestions []string `json:"follow_up_questions,omitempty"`
+	Urgency  string   `json:"urgency,omitempty"`
+	RedFlags []string `json:"red_flags,omitempty"`
 }
 
 // Event — предложенное напоминание.
@@ -194,10 +191,8 @@ func (a *Answer) normalize() {
 	if a.Urgency != "" && urgencyRank(a.Urgency) < 0 {
 		a.Urgency = UrgencyMonitor
 	}
-	// Признаки и вопросы клиент рисует в баннере и в чипах — тоже без
-	// markdown-рендера.
+	// Признаки клиент рисует в баннере — тоже без markdown-рендера.
 	a.RedFlags = cleanStrings(plainStrings(a.RedFlags), MaxRedFlags)
-	a.FollowUpQuestions = cleanStrings(plainStrings(a.FollowUpQuestions), MaxFollowUpQuestions)
 }
 
 // normalize чинит то, что можно починить, и сообщает, годится ли событие.
