@@ -194,13 +194,17 @@ func (a *Answer) normalize() {
 	if a.Urgency != "" && urgencyRank(a.Urgency) < 0 {
 		a.Urgency = UrgencyMonitor
 	}
-	a.RedFlags = cleanStrings(a.RedFlags, MaxRedFlags)
-	a.FollowUpQuestions = cleanStrings(a.FollowUpQuestions, MaxFollowUpQuestions)
+	// Признаки и вопросы клиент рисует в баннере и в чипах — тоже без
+	// markdown-рендера.
+	a.RedFlags = cleanStrings(plainStrings(a.RedFlags), MaxRedFlags)
+	a.FollowUpQuestions = cleanStrings(plainStrings(a.FollowUpQuestions), MaxFollowUpQuestions)
 }
 
 // normalize чинит то, что можно починить, и сообщает, годится ли событие.
 func (e *Event) normalize() bool {
-	e.Name = strings.TrimSpace(e.Name)
+	// Клиент рисует name обычным текстом, а модель выделяет в нём названия
+	// препаратов жирным — снимаем разметку здесь.
+	e.Name = plainText(e.Name)
 	if !oneOf(e.Category, EventCategories) {
 		e.Category = "other"
 	}
@@ -246,7 +250,7 @@ func (e *Entry) normalize() bool {
 		if oneOf(e.Severity, severities) {
 			clean.Severity = e.Severity
 		}
-		clean.Note = strings.TrimSpace(e.Note)
+		clean.Note = plainText(e.Note)
 	case "walk":
 		if e.Minutes <= 0 {
 			return false
@@ -258,7 +262,7 @@ func (e *Entry) normalize() bool {
 			}
 		}
 	case "meal":
-		food := strings.TrimSpace(e.Food)
+		food := plainText(e.Food)
 		if e.Grams <= 0 && food == "" {
 			return false
 		}
@@ -271,7 +275,7 @@ func (e *Entry) normalize() bool {
 			clean.Kind = e.Kind
 		}
 	case "note":
-		clean.Text = strings.TrimSpace(e.Text)
+		clean.Text = plainText(e.Text)
 		if clean.Text == "" {
 			return false
 		}
