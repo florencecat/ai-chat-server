@@ -171,11 +171,15 @@ func (p *yandexProvider) do(req Request, schema json.RawMessage) (text string, s
 	return yResp.Choices[0].Message.Content, resp.StatusCode, body, nil
 }
 
-// mentionsSchema отличает «модель не умеет схему» от прочих 400.
+// mentionsSchema отличает «схему не приняли» от прочих 400.
+//
+// Ищем просто «schema»: Yandex пишет и «json_schema», и «Invalid JSON Schema»
+// через пробел, и чинить этот список по одному поводу за раз — значит каждый
+// раз ронять чат вместо деградации в ответ без схемы.
 func mentionsSchema(body []byte) bool {
 	s := strings.ToLower(string(body))
-	return strings.Contains(s, "response_format") ||
-		strings.Contains(s, "json_schema") ||
+	return strings.Contains(s, "schema") ||
+		strings.Contains(s, "response_format") ||
 		strings.Contains(s, "structured")
 }
 

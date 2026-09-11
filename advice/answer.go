@@ -206,56 +206,72 @@ func (e *Event) normalize() bool {
 // normalize сообщает, можно ли по записи что-то записать в трекер.
 // Правила совпадают с SuggestedEntry.fromAi на клиенте: незнакомый трекер или
 // нехватка ключевого значения — предложение отбрасывается целиком.
+//
+// Запись пересобирается с нуля, а не чинится на месте. Строгая схема Yandex
+// требует, чтобы модель прислала все свойства сразу, поэтому у записи о
+// прогулке приходят и mood, и symptom; уехать клиенту они не должны.
 func (e *Entry) normalize() bool {
-	e.Tracker = strings.TrimSpace(e.Tracker)
-	if !oneOf(e.Tracker, trackers) {
+	tracker := strings.TrimSpace(e.Tracker)
+	if !oneOf(tracker, trackers) {
 		return false
 	}
-	e.DateTime = localDateTime(e.DateTime)
+	clean := Entry{Tracker: tracker, DateTime: localDateTime(e.DateTime)}
 
-	switch e.Tracker {
+	switch tracker {
 	case "mood":
-		return oneOf(e.Mood, moods)
+		if !oneOf(e.Mood, moods) {
+			return false
+		}
+		clean.Mood = e.Mood
 	case "weight":
-		return e.WeightKG > 0
+		if e.WeightKG <= 0 {
+			return false
+		}
+		clean.WeightKG = e.WeightKG
 	case "symptom":
 		if !oneOf(e.Symptom, symptoms) {
 			return false
 		}
-		if !oneOf(e.Severity, severities) {
-			e.Severity = "mild"
+		clean.Symptom = e.Symptom
+		clean.Severity = "mild"
+		if oneOf(e.Severity, severities) {
+			clean.Severity = e.Severity
 		}
-		e.Note = strings.TrimSpace(e.Note)
-		return true
+		clean.Note = strings.TrimSpace(e.Note)
 	case "walk":
 		if e.Minutes <= 0 {
 			return false
 		}
-		kept := e.Activities[:0]
+		clean.Minutes = e.Minutes
 		for _, act := range e.Activities {
 			if oneOf(act, activities) {
-				kept = append(kept, act)
+				clean.Activities = append(clean.Activities, act)
 			}
 		}
-		e.Activities = kept
-		return true
 	case "meal":
-		e.Food = strings.TrimSpace(e.Food)
-		if e.Grams <= 0 && e.Food == "" {
+		food := strings.TrimSpace(e.Food)
+		if e.Grams <= 0 && food == "" {
 			return false
 		}
-		if e.Appetite < 1 || e.Appetite > 5 {
-			e.Appetite = 0
+		clean.Grams = e.Grams
+		clean.Food = food
+		if e.Appetite >= 1 && e.Appetite <= 5 {
+			clean.Appetite = e.Appetite
 		}
-		if !oneOf(e.Kind, mealKinds) {
-			e.Kind = ""
+		if oneOf(e.Kind, mealKinds) {
+			clean.Kind = e.Kind
 		}
-		return true
 	case "note":
-		e.Text = strings.TrimSpace(e.Text)
-		return e.Text != ""
+		clean.Text = strings.TrimSpace(e.Text)
+		if clean.Text == "" {
+			return false
+		}
+	default:
+		return false
 	}
-	return false
+
+	*e = clean
+	return true
 }
 
 // cleanStrings отбрасывает пустые элементы и обрезает список до limit.

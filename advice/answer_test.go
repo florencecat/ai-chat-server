@@ -3,6 +3,7 @@ package advice
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -204,4 +205,122 @@ func TestSchemaIsValidJSON(t *testing.T) {
 	if v["type"] != "object" {
 		t.Errorf("schema type = %v, want object", v["type"])
 	}
+}
+
+// Строгая схема Yandex требует, чтобы модель прислала все свойства сразу,
+// поэтому у записи о прогулке приходят и mood, и symptom. Клиенту они уехать
+// не должны: запись пересобирается из полей своего трекера.
+func TestEntryDropsForeignFields(t *testing.T) {
+	raw := `{"response":"ок","entries":[{
+		"tracker":"walk","datetime":"2026-09-11T10:00:00","minutes":30,
+		"activities":["active"],
+		"mood":"happy","weight_kg":4.2,"symptom":"limping","severity":"severe",
+		"note":"лишнее","grams":100,"food":"курица","appetite":3,"kind":"dry",
+		"text":"тоже лишнее"
+	}]}`
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(a.Entries) != 1 {
+		t.Fatalf("len(Entries) = %d, want 1", len(a.Entries))
+	}
+
+	got, err := json.Marshal(a.Entries[0])
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := `{"tracker":"walk","datetime":"2026-09-11T10:00:00","minutes":30,"activities":["active"]}`
+	if string(got) != want {
+		t.Errorf("entry = %s\nwant %s", got, want)
+	}
+}
+
+// Пустые значения-заглушки, которыми модель заполняет чужие поля, не должны
+// превращать запись в неполную.
+func TestEntryAcceptsEmptyPlaceholders(t *testing.T) {
+	raw := `{"response":"ок","entries":[{
+		"tracker":"note","datetime":"2026-09-11T10:00:00","text":"погуляли",
+		"mood":"","weight_kg":0,"symptom":"","severity":"","note":"",
+		"minutes":0,"activities":[],"grams":0,"food":"","appetite":0,"kind":""
+	}]}`
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(a.Entries) != 1 || a.Entries[0].Text != "погуляли" {
+		t.Fatalf("entries = %+v, want одну заметку", a.Entries)
+	}
+	got, _ := json.Marshal(a.Entries[0])
+	want := `{"tracker":"note","datetime":"2026-09-11T10:00:00","text":"погуляли"}`
+	if string(got) != want {
+		t.Errorf("entry = %s\nwant %s", got, want)
+	}
+}
+
+// Пустая строка — легальное значение enum в схеме, но для своего трекера она
+// означает «ключевого поля нет», и предложение отбрасывается.
+func TestEntryRejectsEmptyOwnField(t *testing.T) {
+	for _, raw := range []string{
+		`{"tracker":"mood","mood":""}`,
+		`{"tracker":"symptom","symptom":""}`,
+		`{"tracker":"meal","grams":0,"food":""}`,
+	} {
+		a, err := Parse(`{"response":"ок","entries":[` + raw + `]}`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if len(a.Entries) != 0 {
+			t.Errorf("%s kept, want dropped", raw)
+		}
+	}
+}
+
+// Каждое свойство каждого объекта схемы должно быть перечислено в required:
+// Yandex отвергает схему целиком, если хоть одно поле необязательное.
+func TestSchemaIsStrict(t *testing.T) {
+	var root map[string]any
+	if err := json.Unmarshal(Schema(), &root); err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+	var walk func(node any, path string)
+	walk = func(node any, path string) {
+		switch v := node.(type) {
+		case map[string]any:
+			if v["type"] == "object" {
+				props, _ := v["properties"].(map[string]any)
+				req, _ := v["required"].([]any)
+				if len(props) != len(req) {
+					t.Errorf("%s: %d properties but %d required", path, len(props), len(req))
+				}
+				for _, r := range req {
+					if _, ok := props[r.(string)]; !ok {
+						t.Errorf("%s: required %q is not a property", path, r)
+					}
+				}
+				for name := range props {
+					if !containsString(req, name) {
+						t.Errorf("%s: property %q is missing from required", path, name)
+					}
+				}
+			}
+			for k, child := range v {
+				walk(child, path+"."+k)
+			}
+		case []any:
+			for i, child := range v {
+				walk(child, fmt.Sprintf("%s[%d]", path, i))
+			}
+		}
+	}
+	walk(root, "root")
+}
+
+func containsString(list []any, want string) bool {
+	for _, v := range list {
+		if s, ok := v.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
 }
