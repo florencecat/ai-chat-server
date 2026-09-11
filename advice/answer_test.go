@@ -324,3 +324,17 @@ func containsString(list []any, want string) bool {
 	}
 	return false
 }
+
+// Пустой ответ модели и оборванный JSON дают у encoding/json одну и ту же
+// ошибку, но лечатся по-разному, поэтому пустой выделен в отдельный случай.
+func TestParseDistinguishesEmptyFromTruncated(t *testing.T) {
+	for _, raw := range []string{"", "   ", "```json\n```"} {
+		if _, err := Parse(raw); !errors.Is(err, ErrEmpty) {
+			t.Errorf("Parse(%q) error = %v, want ErrEmpty", raw, err)
+		}
+	}
+	// Оборванный JSON — это уже ошибка разбора, а не пустой ответ.
+	if _, err := Parse(`{"response":"начало отве`); err == nil || errors.Is(err, ErrEmpty) {
+		t.Errorf("truncated JSON error = %v, want a parse error", err)
+	}
+}

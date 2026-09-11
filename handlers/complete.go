@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -131,6 +132,11 @@ func (h *Handler) respond(
 // ask спрашивает модель и разбирает ответ. Невалидный JSON — повод повторить
 // запрос один раз, а не отдать пользователю мусор: строгая схема уменьшает
 // вероятность срыва, но не исключает его.
+//
+// Отдельно обрабатывается обрыв по лимиту токенов: строгая схема заставляет
+// модель выдать все поля разом, и на длинном ответе JSON обрывается на
+// полуслове. Повторять такое с тем же потолком бессмысленно — повтор идёт с
+// удвоенным.
 func (h *Handler) ask(job chatJob, model string) (answer *advice.Answer, retried bool, err error) {
 	req := llm.Request{
 		Model:        model,
@@ -142,22 +148,67 @@ func (h *Handler) ask(job chatJob, model string) (answer *advice.Answer, retried
 		req.JSONSchema = advice.Schema()
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
-		var content string
-		content, err = h.llm.Chat(req)
+	for attempt := 1; attempt <= 2; attempt++ {
+		var resp llm.Response
+		resp, err = h.llm.Chat(req)
 		if err != nil {
 			// Rate limit повторять бессмысленно — отдаём сразу.
 			if errors.Is(err, llm.ErrTooManyRequests) {
-				return nil, attempt > 0, err
+				return nil, attempt > 1, err
 			}
-			log.Printf("llm call failed (attempt %d, endpoint=%s): %v", attempt+1, job.version, err)
+			log.Printf("llm call failed (attempt %d, endpoint=%s): %v", attempt, job.version, err)
 			continue
 		}
-		answer, err = advice.Parse(content)
+
+		answer, err = advice.Parse(resp.Content)
 		if err == nil {
-			return answer, attempt > 0, nil
+			if resp.Truncated() {
+				// JSON дочитался, но ответ всё равно оборвали: текст в пузыре
+				// закончится на полуслове. Пользователю отдаём — это лучше,
+				// чем ошибка, — но в логе это повод поднять лимит.
+				log.Printf("llm answer hit the token ceiling but parsed (endpoint=%s, max_tokens=%d)",
+					job.version, h.cfg.YandexMaxTokens)
+			}
+			return answer, attempt > 1, nil
 		}
-		log.Printf("llm invalid answer (attempt %d, endpoint=%s): %v", attempt+1, job.version, err)
+
+		log.Printf("llm invalid answer (attempt %d, endpoint=%s, finish_reason=%q, chars=%d): %v; raw=%s",
+			attempt, job.version, resp.FinishReason, utf8.RuneCountInString(resp.Content),
+			err, previewJSON(resp.Content))
+
+		// Обрыв по лимиту — не случайность, а нехватка бюджета: второй
+		// одинаковый запрос упрётся в тот же потолок.
+		if resp.Truncated() {
+			req.MaxTokens = doubleBudget(req.MaxTokens, h.cfg.YandexMaxTokens)
+			log.Printf("llm: retrying with max_tokens=%d (raise YANDEX_MAX_TOKENS to avoid the extra call)",
+				req.MaxTokens)
+		}
 	}
 	return nil, true, err
+}
+
+// doubleBudget удваивает потолок токенов для повтора, отталкиваясь от
+// значения из конфигурации, если на этой попытке он ещё не задавался.
+func doubleBudget(current, fallback int) int {
+	if current <= 0 {
+		current = fallback
+	}
+	if current <= 0 {
+		current = 700
+	}
+	return current * 2
+}
+
+// previewJSON показывает начало и конец ответа модели: по обрезанному хвосту
+// сразу видно, оборвался JSON или пришёл пустым.
+func previewJSON(s string) string {
+	const edge = 200
+	switch r := []rune(s); {
+	case len(r) == 0:
+		return "<empty>"
+	case len(r) <= 2*edge:
+		return strconv.Quote(s)
+	default:
+		return strconv.Quote(string(r[:edge])) + " … " + strconv.Quote(string(r[len(r)-edge:]))
+	}
 }

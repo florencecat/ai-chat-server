@@ -74,10 +74,10 @@ func (p *yandexProvider) modelURI(model string) string {
 	return fmt.Sprintf("gpt://%s/%s", p.cfg.YandexFolderID, model)
 }
 
-func (p *yandexProvider) Chat(req Request) (string, error) {
-	text, status, body, err := p.do(req, req.JSONSchema)
+func (p *yandexProvider) Chat(req Request) (Response, error) {
+	out, status, body, err := p.do(req, req.JSONSchema)
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 
 	// Строгую схему поддерживают не все модели каталога. Вместо того чтобы
@@ -86,25 +86,25 @@ func (p *yandexProvider) Chat(req Request) (string, error) {
 	if status == http.StatusBadRequest && req.JSONSchema != nil && mentionsSchema(body) {
 		log.Printf("yandex: model %s rejected response_format, retrying without schema: %s",
 			req.Model, truncate(body, 300))
-		text, status, body, err = p.do(req, nil)
+		out, status, body, err = p.do(req, nil)
 		if err != nil {
-			return "", err
+			return Response{}, err
 		}
 	}
 
 	switch {
 	case status == http.StatusTooManyRequests:
-		return "", ErrTooManyRequests
+		return Response{}, ErrTooManyRequests
 	case status != http.StatusOK:
-		return "", fmt.Errorf("yandex failed %d: %s", status, truncate(body, 500))
+		return Response{}, fmt.Errorf("yandex failed %d: %s", status, truncate(body, 500))
 	}
-	return text, nil
+	return out, nil
 }
 
 // do выполняет один запрос. Ошибку возвращает только на уровне транспорта:
 // неуспешный HTTP-статус отдаётся вызывающему вместе с телом, чтобы тот мог
 // решить, повторять ли запрос.
-func (p *yandexProvider) do(req Request, schema json.RawMessage) (text string, status int, body []byte, err error) {
+func (p *yandexProvider) do(req Request, schema json.RawMessage) (out Response, status int, body []byte, err error) {
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = p.cfg.YandexMaxTokens
@@ -136,12 +136,12 @@ func (p *yandexProvider) do(req Request, schema json.RawMessage) (text string, s
 
 	payload, err := json.Marshal(reqData)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("yandex marshal: %w", err)
+		return out, 0, nil, fmt.Errorf("yandex marshal: %w", err)
 	}
 
 	httpReq, err := http.NewRequest("POST", yandexChatURL, bytes.NewReader(payload))
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("yandex request: %w", err)
+		return out, 0, nil, fmt.Errorf("yandex request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Api-Key "+p.cfg.YandexAPIKey)
@@ -149,26 +149,30 @@ func (p *yandexProvider) do(req Request, schema json.RawMessage) (text string, s
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("yandex do: %w", err)
+		return out, 0, nil, fmt.Errorf("yandex do: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return "", resp.StatusCode, nil, fmt.Errorf("yandex read: %w", err)
+		return out, resp.StatusCode, nil, fmt.Errorf("yandex read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", resp.StatusCode, body, nil
+		return out, resp.StatusCode, body, nil
 	}
 
 	var yResp yandexResponse
 	if err := json.Unmarshal(body, &yResp); err != nil {
-		return "", resp.StatusCode, body, fmt.Errorf("yandex parse: %w", err)
+		return out, resp.StatusCode, body, fmt.Errorf("yandex parse: %w", err)
 	}
 	if len(yResp.Choices) == 0 {
-		return "", resp.StatusCode, body, fmt.Errorf("yandex: empty choices")
+		return out, resp.StatusCode, body, fmt.Errorf("yandex: empty choices")
 	}
-	return yResp.Choices[0].Message.Content, resp.StatusCode, body, nil
+	choice := yResp.Choices[0]
+	return Response{
+		Content:      choice.Message.Content,
+		FinishReason: choice.FinishReason,
+	}, resp.StatusCode, body, nil
 }
 
 // mentionsSchema отличает «схему не приняли» от прочих 400.

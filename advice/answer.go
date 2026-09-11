@@ -14,9 +14,15 @@ import (
 	"strings"
 )
 
-// ErrNoText — модель вернула валидный JSON без текста ответа. Показывать
-// такое пользователю нечем, поэтому это ошибка, а не ответ.
-var ErrNoText = errors.New("advice: response text is empty")
+var (
+	// ErrNoText — модель вернула валидный JSON без текста ответа. Показывать
+	// такое пользователю нечем, поэтому это ошибка, а не ответ.
+	ErrNoText = errors.New("advice: response text is empty")
+	// ErrEmpty — модель не вернула вообще ничего. Отдельная ошибка, потому
+	// что json.Unmarshal на пустой строке даёт «unexpected end of JSON
+	// input» — ровно то же, что на оборванном ответе, хотя причины разные.
+	ErrEmpty = errors.New("advice: model returned no content")
+)
 
 // Лимиты карточек под ответом. Три карточки — уже полэкрана.
 const (
@@ -132,6 +138,9 @@ func urgencyRank(level string) int {
 // как повод повторить запрос к модели, а не как ответ.
 func Parse(raw string) (*Answer, error) {
 	raw = stripCodeFence(strings.TrimSpace(raw))
+	if raw == "" {
+		return nil, ErrEmpty
+	}
 	var a Answer
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, fmt.Errorf("advice: parse: %w", err)

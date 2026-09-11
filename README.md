@@ -322,7 +322,7 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 | `YANDEX_API_KEY`       | —                             | API-ключ сервисного аккаунта                        |
 | `YANDEX_MODEL`         | `yandexgpt-lite/latest`       | Модель по умолчанию; принимается и готовый `gpt://…` |
 | `YANDEX_TEMPERATURE`   | `0.25`                        | Температура                                         |
-| `YANDEX_MAX_TOKENS`    | `700`                         | Потолок длины ответа                                |
+| `YANDEX_MAX_TOKENS`    | `1500`                        | Потолок длины ответа (аварийный: длину держит промт) |
 | `YANDEX_STRUCTURED_OUTPUT` | `true`                    | Слать `response_format.json_schema`                 |
 | `SYSTEM_PROMPT_FILE`   | `prompts/system.txt`          | Промт для `/chat`                                   |
 | `SYSTEM_PROMPT`        | _(см. код)_                   | Промт строкой, если файла нет                       |

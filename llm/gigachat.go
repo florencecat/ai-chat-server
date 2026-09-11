@@ -24,7 +24,7 @@ func (p *gigaChatProvider) Name() string { return "gigachat" }
 
 func (p *gigaChatProvider) SupportsSchema() bool { return false }
 
-func (p *gigaChatProvider) Chat(req Request) (string, error) {
+func (p *gigaChatProvider) Chat(req Request) (Response, error) {
 	messages := make([]gigachat.Message, 0, len(req.Messages)+1)
 	if req.SystemPrompt != "" {
 		messages = append(messages, gigachat.Message{Role: "system", Content: req.SystemPrompt})
@@ -36,12 +36,15 @@ func (p *gigaChatProvider) Chat(req Request) (string, error) {
 	resp, err := p.client.Chat(req.Model, messages)
 	if err != nil {
 		if errors.Is(err, gigachat.ErrTooManyRequests) {
-			return "", ErrTooManyRequests
+			return Response{}, ErrTooManyRequests
 		}
-		return "", err
+		return Response{}, err
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("gigachat: empty choices")
+		return Response{}, fmt.Errorf("gigachat: empty choices")
 	}
-	return resp.Choices[0].Message.Content, nil
+	return Response{
+		Content:      resp.Choices[0].Message.Content,
+		FinishReason: resp.Choices[0].FinishReason,
+	}, nil
 }

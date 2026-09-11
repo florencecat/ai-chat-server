@@ -112,7 +112,7 @@ func Load() *Config {
 		YandexAPIKey:      getEnv("YANDEX_API_KEY", ""),
 		YandexModel:       getEnv("YANDEX_MODEL", "yandexgpt-lite/latest"),
 		YandexTemperature: getEnvFloat("YANDEX_TEMPERATURE", 0.25),
-		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 700),
+		YandexMaxTokens:   getEnvInt("YANDEX_MAX_TOKENS", 1500),
 		YandexStructured:  getEnvBool("YANDEX_STRUCTURED_OUTPUT", true),
 
 		SystemPrompt:   loadSystemPrompt(),

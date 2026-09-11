@@ -38,9 +38,24 @@ type Request struct {
 	SchemaName string
 }
 
+// Response — ответ модели вместе с тем, почему генерация закончилась.
+//
+// FinishReason нужен вызывающему: "length" означает, что ответ оборвался на
+// полуслове и JSON в нём заведомо неполный. Без этого признака обрыв по
+// лимиту токенов неотличим от пустого ответа — оба дают «unexpected end of
+// JSON input», но лечатся по-разному.
+type Response struct {
+	Content string
+	// FinishReason: "stop" | "length" | "" (провайдер не сообщил).
+	FinishReason string
+}
+
+// Truncated сообщает, что модель упёрлась в потолок max_tokens.
+func (r Response) Truncated() bool { return r.FinishReason == "length" }
+
 // Provider — единый интерфейс к LLM.
 type Provider interface {
-	Chat(req Request) (string, error)
+	Chat(req Request) (Response, error)
 	Name() string
 	// SupportsSchema сообщает, умеет ли провайдер строгую схему ответа.
 	// Если нет, вызывающему остаётся полагаться на промт и нормализацию.
