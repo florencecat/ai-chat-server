@@ -326,6 +326,7 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 | Переменная             | По умолчанию                  | Описание                                            |
 |------------------------|-------------------------------|-----------------------------------------------------|
 | `PORT`                 | `8080`                        | Порт HTTP-сервера                                   |
+| `TRUSTED_PROXIES`      | `127.0.0.1,::1,172.16.0.0/12` | Чьему `X-Forwarded-For` верить; `none` — никому     |
 | `LLM_PROVIDER`         | `yandex`                      | `yandex` \| `gigachat`                              |
 | `YANDEX_FOLDER_ID`     | —                             | Каталог Yandex Cloud                                |
 | `YANDEX_API_KEY`       | —                             | API-ключ сервисного аккаунта                        |
@@ -484,6 +485,22 @@ docker compose up -d
 Требуемые секреты репозитория: `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_KEY`.
 
 В продакшене сервис работает за reverse-proxy [Caddy](https://caddyserver.com/), который терминирует TLS и проксирует на `127.0.0.1:8091`.
+
+### Защита от сканеров
+
+Сервер регулярно перебирают сканеры уязвимостей (`/.env`, `/phpinfo.php`, …). Сам ai-server такие запросы в лог не пишет — они видны в access-логе Caddy.
+
+- [`deploy/caddy/Caddyfile.example`](deploy/caddy/Caddyfile.example) — JSON access-лог и обрыв соединения на заведомо вредные пути;
+- [`deploy/fail2ban/`](deploy/fail2ban) — два jail по этому логу: `caddy-probe` (бан с первого обращения к `.env`/`*.php`/…) и `caddy-404` (20 ответов 404 за 5 минут).
+
+```bash
+sudo cp deploy/fail2ban/filter.d/*.conf /etc/fail2ban/filter.d/
+sudo cp deploy/fail2ban/jail.d/ai-server.conf /etc/fail2ban/jail.d/
+sudo fail2ban-regex /var/log/caddy/access.log caddy-probe   # проверить фильтр на живом логе
+sudo systemctl reload fail2ban && sudo fail2ban-client status caddy-probe
+```
+
+Если Caddy запущен в Docker с опубликованными портами, баны нужно вешать на цепочку `DOCKER-USER` (`chain = DOCKER-USER` в jail): правила в `INPUT` до контейнеров не доходят.
 
 ## Стек
 

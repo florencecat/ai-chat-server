@@ -11,6 +11,11 @@ import (
 type Config struct {
 	Port string
 
+	// TrustedProxies — адреса/подсети, чьему X-Forwarded-For можно верить.
+	// Без явного списка Gin доверяет заголовку от кого угодно, и клиент
+	// может подставить себе любой IP.
+	TrustedProxies []string
+
 	LLMProvider string // "gigachat" | "yandex"
 
 	GigaChatAuthURL      string
@@ -98,6 +103,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:                 getEnv("PORT", "8080"),
+		TrustedProxies:       getEnvListDefault("TRUSTED_PROXIES", "127.0.0.1,::1,172.16.0.0/12"),
 		LLMProvider:          getEnv("LLM_PROVIDER", "yandex"),
 		GigaChatAuthURL:      getEnv("GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
 		GigaChatBaseURL:      getEnv("GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1"),
@@ -233,10 +239,10 @@ func getEnv(key, fallback string) string {
 
 // getEnvList читает список значений через запятую, отбрасывая пустые элементы.
 func getEnvList(key string) []string {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return nil
-	}
+	return splitList(os.Getenv(key))
+}
+
+func splitList(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {
 		if v := strings.TrimSpace(part); v != "" {
@@ -244,6 +250,16 @@ func getEnvList(key string) []string {
 		}
 	}
 	return out
+}
+
+// getEnvListDefault — getEnvList со значением по умолчанию. Строка "none"
+// означает пустой список: не доверять никаким прокси.
+func getEnvListDefault(key, fallback string) []string {
+	list := splitList(getEnv(key, fallback))
+	if len(list) == 1 && list[0] == "none" {
+		return nil
+	}
+	return list
 }
 
 func getEnvInt(key string, fallback int) int {

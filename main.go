@@ -110,7 +110,10 @@ func main() {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("TRUSTED_PROXIES: %v", err)
+	}
+	r.Use(routedOnlyLogger(), gin.Recovery())
 
 	r.GET("/health", h.Health)
 	r.POST("/chat", h.Chat)
@@ -144,5 +147,21 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("shutdown error: %v", err)
+	}
+}
+
+// routedOnlyLogger пишет в лог только запросы к зарегистрированным маршрутам.
+// Сканеры перебирают сотни путей вроде /.env и /phpinfo.php, и эти 404
+// забивают лог. Их всё равно видно в access-логе Caddy, по которому работает
+// fail2ban.
+func routedOnlyLogger() gin.HandlerFunc {
+	logger := gin.Logger()
+	return func(c *gin.Context) {
+		// FullPath пуст, когда запрос не совпал ни с одним маршрутом.
+		if c.FullPath() == "" {
+			c.Next()
+			return
+		}
+		logger(c)
 	}
 }

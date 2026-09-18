@@ -1,0 +1,22 @@
+# Фрагмент Caddyfile для ai-server. Домен заменить на свой.
+api.example.com {
+	# JSON access-лог — его читает fail2ban (deploy/fail2ban).
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+		format json
+	}
+
+	# Сканеры: dot-файлы (.env, .git, …), PHP, WordPress, профилировщики.
+	# Соединение рвётся без ответа и до приложения не доходит.
+	# /.well-known/ не трогаем — через него идёт выпуск сертификатов.
+	@probe {
+		path_regexp probe (?i)(/\.|\.php$|/wp-|phpinfo|/_profiler|/_environment|/server-status)
+		not path /.well-known/*
+	}
+	abort @probe
+
+	reverse_proxy 127.0.0.1:8091
+}
