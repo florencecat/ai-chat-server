@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"ai-server/entitlement"
+	"ai-server/metrics"
 	"ai-server/rustore"
 )
 
@@ -72,7 +73,7 @@ func (h *Handler) VerifyPurchase(c *gin.Context) {
 	if err != nil {
 		status, code := verifyErrorResponse(err)
 		if status == http.StatusInternalServerError || status == http.StatusBadGateway {
-			log.Printf("entitlement: verify %s for user %s: %v", purchaseID, userID, err)
+			slog.Error("entitlement: verify", "purchase", purchaseID, "user", userID, "err", err)
 		}
 		c.JSON(status, errResp{Error: err.Error(), Code: code})
 		return
@@ -128,14 +129,16 @@ func (h *Handler) RuStoreWebhook(c *gin.Context) {
 	// payload без ключа из консоли RuStore нельзя.
 	notification, err := rustore.DecryptNotification(h.nKey, envelope.Payload)
 	if err != nil {
-		log.Printf("rustore webhook: decrypt notification %s: %v", envelope.ID, err)
+		slog.Warn("rustore webhook: decrypt notification", "id", envelope.ID, "err", err)
+		metrics.Webhook("", "invalid")
 		c.JSON(http.StatusBadRequest, errResp{Error: "cannot decrypt payload", Code: "INVALID_PAYLOAD"})
 		return
 	}
 
 	// Песочные события не должны трогать боевые права (и наоборот).
 	if notification.Sandbox() != h.cfg.RuStoreSandbox {
-		log.Printf("rustore webhook: ignoring %s (sandbox mismatch)", notification.NotificationType)
+		slog.Info("rustore webhook: ignoring, sandbox mismatch", "type", notification.NotificationType)
+		metrics.Webhook(notification.NotificationType, "ignored")
 		c.Status(http.StatusOK)
 		return
 	}
@@ -144,12 +147,16 @@ func (h *Handler) RuStoreWebhook(c *gin.Context) {
 		// Горутина живёт вне gin.Recovery — паника здесь уронила бы процесс.
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("rustore webhook: panic while applying notification %s: %v", envelope.ID, r)
+				slog.Error("rustore webhook: panic while applying notification", "id", envelope.ID, "panic", r)
+				metrics.Webhook(notification.NotificationType, "error")
 			}
 		}()
 		if err := h.ent.HandleNotification(notification); err != nil {
-			log.Printf("rustore webhook: apply %s (id=%s): %v", notification.NotificationType, envelope.ID, err)
+			slog.Error("rustore webhook: apply", "type", notification.NotificationType, "id", envelope.ID, "err", err)
+			metrics.Webhook(notification.NotificationType, "error")
+			return
 		}
+		metrics.Webhook(notification.NotificationType, "applied")
 	}()
 
 	c.Status(http.StatusOK)

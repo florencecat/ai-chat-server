@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ai-server/config"
+	"ai-server/metrics"
 )
 
 var (
@@ -60,7 +61,7 @@ type Client struct {
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 10 * time.Second, Transport: metrics.Transport("pocketbase", nil)},
 	}
 }
 

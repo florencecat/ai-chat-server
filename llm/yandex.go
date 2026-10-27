@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"ai-server/config"
+	"ai-server/metrics"
 )
 
 // yandexProvider — клиент Yandex AI Studio, OpenAI-совместимый эндпоинт
@@ -27,7 +28,7 @@ const yandexChatURL = "https://ai.api.cloud.yandex.net/v1/chat/completions"
 func newYandex(cfg *config.Config) *yandexProvider {
 	return &yandexProvider{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: metrics.Transport("yandex", nil)},
 	}
 }
 
@@ -84,8 +85,8 @@ func (p *yandexProvider) Chat(req Request) (Response, error) {
 	// уронить чат целиком, повторяем запрос без схемы: формат ответа тогда
 	// держится на промте, а лишнее всё равно срежет нормализация.
 	if status == http.StatusBadRequest && req.JSONSchema != nil && mentionsSchema(body) {
-		log.Printf("yandex: model %s rejected response_format, retrying without schema: %s",
-			req.Model, truncate(body, 300))
+		slog.Warn("yandex: model rejected response_format, retrying without schema",
+			"model", req.Model, "body", truncate(body, 300))
 		out, status, body, err = p.do(req, nil)
 		if err != nil {
 			return Response{}, err

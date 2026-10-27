@@ -1,4 +1,12 @@
 # Фрагмент Caddyfile для ai-server. Домен заменить на свой.
+
+# Глобальные параметры: метрики Caddy на admin API (localhost:2019/metrics),
+# их забирает Prometheus (deploy/monitoring). Наружу admin API не открыт.
+# Caddy старше 2.8 вместо `metrics` понимает `servers { metrics }`.
+{
+	metrics
+}
+
 api.example.com {
 	# JSON access-лог — его читает fail2ban (deploy/fail2ban).
 	log {

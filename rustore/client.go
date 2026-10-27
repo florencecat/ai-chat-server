@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"ai-server/config"
+	"ai-server/metrics"
 )
 
 var (
@@ -92,7 +93,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		subscriptionIDs: cfg.RuStoreSubscriptionIDs,
 		sandbox:         cfg.RuStoreSandbox,
 		// Подтверждение покупки, по документации, отвечает до 30с.
-		httpClient: &http.Client{Timeout: 40 * time.Second},
+		httpClient: &http.Client{Timeout: 40 * time.Second, Transport: metrics.Transport("rustore", nil)},
 	}, nil
 }
 

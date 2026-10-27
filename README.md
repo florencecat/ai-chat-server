@@ -57,6 +57,7 @@ Flutter / клиент
 | `rustore`     | Клиент RuStore Public API и расшифровка серверных уведомлений    |
 | `entitlement` | Доменная модель прав доступа: тарифы, верификация, вебхуки       |
 | `cache`       | Кеш ответов поверх BoltDB с TTL                                  |
+| `report`      | PDF «Карточка для ветеринара» (gofpdf)                           |
 | `handlers`    | HTTP-обработчики (Gin)                                           |
 
 ## Премиум-статус (RuStore Pay SDK)
@@ -292,6 +293,34 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 шлёт до 16 повторов за 36 часов. Применение прав, которое ходит в public-api,
 выполняется в фоне.
 
+### `GET /report/vet-card/:pet_id`
+
+PDF «Карточка для ветеринара» (макет — `docs/pdf-report`). Только для
+премиума. Данные сервер берёт из PocketBase сам (`pets`, `weights`, `pills`,
+`treatments`, `symptoms`): тело от клиента не принимается, чтобы эндпоинт не
+превращался в генератор документов с нашим логотипом и произвольным текстом.
+Владелец питомца проверяется в фильтре — чужой `pet_id` даёт `404`.
+
+Query: `tz` (IANA-пояс, по умолчанию `Europe/Moscow`), `weight_history`
+(`1` по умолчанию) и `vet_notes` (`0` по умолчанию) — блоки макета.
+
+**Повторные отчёты.** Перед сборкой сервер запрашивает у PocketBase только
+`id,updated` записей карточки. Ключ отчёта — хэш этих пар, дня пользователя
+(от него зависят возраст, статусы прививок и окно симптомов), версии шаблона
+и набора блоков. Хэшируются пары, а не `max(updated)`: удаление записи
+`updated` не меняет. Совпал ключ — отдаётся сохранённый PDF без выборки
+данных и рендера. На питомца хранится одна последняя версия — в коллекции
+`pdf_reports` (см. ниже).
+
+**Антиспам.** `REPORT_REQUESTS_PER_MINUTE` ограничивает любые запросы,
+`REPORT_COOLDOWN` и `REPORT_PER_DAY` — только реальные генерации по новым
+данным. Если данные изменились, а генерация сейчас запрещена, отдаётся
+последняя версия с `X-Report-Stale: true` и `Retry-After`; `429` — только
+когда отдавать нечего.
+
+Заголовки ответа: `X-Report-Cached`, `X-Report-Stale`,
+`X-Report-Generated-At` (RFC 3339), `Cache-Control: private, no-store`.
+
 ### `GET /health`
 
 ```json
@@ -308,11 +337,15 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 | 401  | `MISSING_AUTH`             | Нет заголовка `Authorization`                  |
 | 401  | `UNAUTHORIZED`             | Невалидный или истёкший JWT                    |
 | 403  | `TOKEN_NOT_FOUND`          | Записи в `tokens` нет и её не удалось создать  |
+| 403  | `PREMIUM_REQUIRED`         | Отчёт запрошен без премиума                    |
 | 404  | `PURCHASE_NOT_FOUND`       | RuStore не знает такой `purchaseId`            |
+| 404  | `PET_NOT_FOUND`            | Питомца нет или он чужой                       |
 | 409  | `PURCHASE_NOT_CONFIRMED`   | Покупка найдена, но не оплачена                |
 | 409  | `PURCHASE_ALREADY_CLAIMED` | `purchaseId` уже привязан к другому аккаунту   |
 | 429  | `RATE_LIMIT_MINUTE`        | Превышен лимит запросов в минуту               |
 | 429  | `RATE_LIMIT_DAY`           | Превышена дневная квота                        |
+| 429  | `RATE_LIMIT_REPORT`        | Лимит генераций отчёта, а старой версии нет    |
+| 502  | `UPSTREAM_ERROR`           | PocketBase недоступен                          |
 | 502  | `VERIFICATION_FAILED`      | RuStore public-api недоступен или ответил ошибкой |
 | 503  | `VERIFICATION_DISABLED`    | `RUSTORE_ENABLED=false`                        |
 | 503  | `WEBHOOK_DISABLED`         | Не задан `RUSTORE_NOTIFICATION_KEY`            |
@@ -327,6 +360,9 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 |------------------------|-------------------------------|-----------------------------------------------------|
 | `PORT`                 | `8080`                        | Порт HTTP-сервера                                   |
 | `TRUSTED_PROXIES`      | `127.0.0.1,::1,172.16.0.0/12` | Чьему `X-Forwarded-For` верить; `none` — никому     |
+| `METRICS_ADDR`         | `127.0.0.1:9091`              | Отдельный порт `/metrics` для Prometheus; пусто — выключено |
+| `LOG_FORMAT`           | `json`                        | `json` (для Loki) или `text`                        |
+| `LOG_LEVEL`            | `info`                        | `debug` \| `info` \| `warn` \| `error`           |
 | `LLM_PROVIDER`         | `yandex`                      | `yandex` \| `gigachat`                              |
 | `YANDEX_FOLDER_ID`     | —                             | Каталог Yandex Cloud                                |
 | `YANDEX_API_KEY`       | —                             | API-ключ сервисного аккаунта                        |
@@ -360,6 +396,9 @@ Flutter (Pay SDK)                ai-server                     RuStore public-ap
 | `MODEL_FREE`           | —                             | Базовая модель; пусто — модель провайдера по умолчанию |
 | `MODEL_PREMIUM`        | —                             | Улучшенная модель для премиум-пользователей          |
 | `ENTITLEMENT_GRACE`    | `24h`                         | Сколько премиум живёт после `expires_at`             |
+| `REPORT_REQUESTS_PER_MINUTE` | `10`                    | Запросы отчёта в минуту, включая готовые            |
+| `REPORT_COOLDOWN`      | `1m`                          | Пауза между генерациями отчёта по новым данным      |
+| `REPORT_PER_DAY`       | `20`                          | Генераций отчёта в сутки (UTC) на пользователя      |
 | `PB_URL`               | `http://127.0.0.1:8090`       | URL PocketBase                                      |
 | `PB_ADMIN_EMAIL`       | —                             | Email суперпользователя PocketBase                  |
 | `PB_ADMIN_PASSWORD`    | —                             | Пароль суперпользователя PocketBase                 |
@@ -425,6 +464,25 @@ PocketBase на `users.create` больше не нужен, но и не меш
 клиент уже отправляет её в `pushChat`, и без колонки `urgency` и `red_flags`
 не переживут восстановление истории на новом устройстве. Колонка добавляется
 руками в админке PocketBase.
+
+### Коллекция `pdf_reports`
+
+Последний PDF «Карточки для ветеринара», одна запись на питомца. Сервер
+пишет и читает её под админским токеном.
+
+| Поле     | Тип      | Примечание                                                       |
+|----------|----------|------------------------------------------------------------------|
+| `pet`    | relation | → `pets`, одиночная, **Cascade delete**, **уникальный индекс**   |
+| `key`    | text     | Ключ отчёта (sha256 hex, 64 символа): по нему сервер понимает, что PDF актуален |
+| `report` | file     | Один файл, **Protected**, MIME `application/pdf`, лимит 5 МБ     |
+
+Правила доступа оставить пустыми (только суперпользователь): владельца
+питомца проверяет сервер, а клиент получает PDF только через
+`GET /report/vet-card/:pet_id`. Protected обязателен — иначе файл с
+медицинскими данными открывается по прямой ссылке без авторизации; сервер
+скачивает его с файловым токеном (`POST /api/files/token`). Уникальный
+индекс по `pet` страхует от второй записи при гонке, Cascade delete убирает
+отчёт вместе с питомцем.
 
 ### Коллекция `entitlements`
 
@@ -501,6 +559,62 @@ sudo systemctl reload fail2ban && sudo fail2ban-client status caddy-probe
 ```
 
 Если Caddy запущен в Docker с опубликованными портами, баны нужно вешать на цепочку `DOCKER-USER` (`chain = DOCKER-USER` в jail): правила в `INPUT` до контейнеров не доходят.
+
+## Мониторинг
+
+Стек из [`docker-compose.monitoring.yml`](docker-compose.monitoring.yml):
+Prometheus, Grafana, Loki, Alloy, node-exporter и cAdvisor. Конфиги лежат в
+[`deploy/monitoring`](deploy/monitoring). Все сервисы работают в сети хоста и
+слушают только `127.0.0.1`, поэтому наружу ничего не открыто, а Prometheus
+видит ai-server, PocketBase и Caddy, которые живут вне Docker.
+
+| Что | Откуда |
+|-----|--------|
+| CPU, память, диск, сеть сервера | node-exporter |
+| Ресурсы контейнеров | cAdvisor |
+| Запросы, коды ответов, задержки, LLM, кэш, отчёты, вебхуки | `/metrics` ai-server (`127.0.0.1:9091`) |
+| Исходящие запросы к PocketBase, Yandex/GigaChat, RuStore | `/metrics` ai-server (`ai_server_upstream_*`) |
+| Входящий трафик | метрики Caddy (`metrics` в [Caddyfile](deploy/caddy/Caddyfile.example)) |
+| Логи контейнеров и access-лог Caddy | Alloy → Loki |
+| Журнал запросов и ошибки PocketBase | Grafana читает `pb_data/auxiliary.db` (таблица `_logs`) в режиме только для чтения |
+
+Метрики ai-server не публикуются через Caddy: `/metrics` слушает отдельный
+порт, проброшенный только на loopback хоста.
+
+### Запуск
+
+На сервере рядом с `docker-compose.yml` (в `/opt/ai-server`) должны лежать
+`docker-compose.monitoring.yml` и каталог `deploy/monitoring`. CI их не
+копирует. В `.env` нужно добавить:
+
+```bash
+GRAFANA_ADMIN_PASSWORD=<длинный пароль>
+PB_DATA_DIR=/путь/к/pb_data
+```
+
+После этого:
+
+```bash
+docker compose up -d
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+Первая команда пересоздаёт ai-server с портом `9091`, вторая поднимает стек.
+Если в Caddyfile включены метрики, перезагрузите Caddy.
+
+### Доступ
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 user@server
+```
+
+Grafana откроется на <http://localhost:3000> (логин `admin`), Prometheus — на
+<http://localhost:9090>. Дашборд «ai-server: обзор» лежит в папке `ai-server`.
+Он хранится в [`deploy/monitoring/grafana/dashboards`](deploy/monitoring/grafana/dashboards):
+правки, сделанные в UI, нужно экспортировать в JSON и закоммитить.
+
+Логи хранятся 14 дней, метрики — 30 дней, но не больше 5 ГБ. Журнал
+PocketBase хранится столько, сколько задано в его админке (Settings → Logs).
 
 ## Стек
 

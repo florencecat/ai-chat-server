@@ -1,7 +1,7 @@
 package config
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +10,10 @@ import (
 
 type Config struct {
 	Port string
+
+	// MetricsAddr — адрес отдельного слушателя /metrics. Пусто — выключено.
+	// По умолчанию только loopback: этот порт не должен попадать в интернет.
+	MetricsAddr string
 
 	// TrustedProxies — адреса/подсети, чьему X-Forwarded-For можно верить.
 	// Без явного списка Gin доверяет заголовку от кого угодно, и клиент
@@ -83,6 +87,14 @@ type Config struct {
 	// Страховка от опоздавшего вебхука о продлении.
 	EntitlementGrace time.Duration
 
+	// ── PDF «Карточка для ветеринара» ─────────────────────────────────────
+	// ReportRequestsPerMinute — любые запросы отчёта, включая отдачу готового.
+	// ReportCooldown / ReportPerDay — только реальные генерации по новым
+	// данным; сверх лимита отдаётся последняя версия с X-Report-Stale.
+	ReportRequestsPerMinute int
+	ReportCooldown          time.Duration
+	ReportPerDay            int
+
 	PBUrl           string
 	PBAdminEmail    string
 	PBAdminPassword string
@@ -103,6 +115,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:                 getEnv("PORT", "8080"),
+		MetricsAddr:          getEnv("METRICS_ADDR", "127.0.0.1:9091"),
 		TrustedProxies:       getEnvListDefault("TRUSTED_PROXIES", "127.0.0.1,::1,172.16.0.0/12"),
 		LLMProvider:          getEnv("LLM_PROVIDER", "yandex"),
 		GigaChatAuthURL:      getEnv("GIGACHAT_AUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
@@ -146,6 +159,10 @@ func Load() *Config {
 
 		EntitlementGrace: getEnvDuration("ENTITLEMENT_GRACE", "24h"),
 
+		ReportRequestsPerMinute: getEnvInt("REPORT_REQUESTS_PER_MINUTE", 10),
+		ReportCooldown:          getEnvDuration("REPORT_COOLDOWN", "1m"),
+		ReportPerDay:            getEnvInt("REPORT_PER_DAY", 20),
+
 		PBUrl:           getEnv("PB_URL", "http://127.0.0.1:8090"),
 		PBAdminEmail:    getEnv("PB_ADMIN_EMAIL", ""),
 		PBAdminPassword: getEnv("PB_ADMIN_PASSWORD", ""),
@@ -171,7 +188,7 @@ func loadRuStorePrivateKey() string {
 		if err == nil {
 			return string(data)
 		}
-		log.Printf("read RUSTORE_PRIVATE_KEY_FILE %q: %v", path, err)
+		slog.Error("config: RUSTORE_PRIVATE_KEY_FILE not read", "path", path, "err", err)
 	}
 	return getEnv("RUSTORE_PRIVATE_KEY", "")
 }
@@ -186,18 +203,17 @@ func loadSystemPrompt() string {
 	const fallback = "Ты — полезный ассистент. Отвечай строго в формате JSON. Никакого текста вне JSON-объекта."
 	if path := os.Getenv("SYSTEM_PROMPT_FILE"); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
-			log.Printf("config: system prompt from %s (%d bytes)", path, len(data))
+			slog.Info("config: system prompt loaded", "source", path, "bytes", len(data))
 			return string(data)
 		} else {
-			log.Printf("config: SYSTEM_PROMPT_FILE %q not read: %v", path, err)
+			slog.Warn("config: SYSTEM_PROMPT_FILE not read", "path", path, "err", err)
 		}
 	}
 	if v := os.Getenv("SYSTEM_PROMPT"); v != "" {
-		log.Printf("config: system prompt from SYSTEM_PROMPT env (%d bytes); "+
-			"prompts/system.txt is NOT used", len(v))
+		slog.Warn("config: system prompt from SYSTEM_PROMPT env, prompts/system.txt is NOT used", "bytes", len(v))
 		return v
 	}
-	log.Print("config: system prompt is the built-in fallback")
+	slog.Warn("config: system prompt is the built-in fallback")
 	return fallback
 }
 
@@ -211,11 +227,11 @@ func loadSystemPromptV2() string {
 			continue
 		}
 		if data, err := os.ReadFile(path); err == nil {
-			log.Printf("config: v2 system prompt from %s (%d bytes)", path, len(data))
+			slog.Info("config: v2 system prompt loaded", "source", path, "bytes", len(data))
 			return string(data)
 		}
 	}
-	log.Print("config: prompts/system_v2.txt not found, /v2/chat falls back to the v1 prompt")
+	slog.Warn("config: prompts/system_v2.txt not found, /v2/chat falls back to the v1 prompt")
 	return loadSystemPrompt()
 }
 
@@ -224,7 +240,7 @@ func loadSystemPromptV2() string {
 func loadFile(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("config: optional prompt file %q not loaded: %v", path, err)
+		slog.Warn("config: optional prompt file not loaded", "path", path, "err", err)
 		return ""
 	}
 	return strings.TrimSpace(string(data))

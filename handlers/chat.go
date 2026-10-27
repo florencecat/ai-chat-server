@@ -3,7 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -27,6 +27,9 @@ type Handler struct {
 	ent  *entitlement.Service
 	rf   *advice.RedFlags
 	nKey []byte // ключ расшифровки вебхуков RuStore; nil — вебхук выключен
+
+	reportLimit *reportLimiter
+	reportLocks keyedMutex
 }
 
 func New(
@@ -38,7 +41,10 @@ func New(
 	redFlags *advice.RedFlags,
 	notificationKey []byte,
 ) *Handler {
-	return &Handler{llm: provider, c: c, pb: pb, cfg: cfg, ent: ent, rf: redFlags, nKey: notificationKey}
+	return &Handler{
+		llm: provider, c: c, pb: pb, cfg: cfg, ent: ent, rf: redFlags, nKey: notificationKey,
+		reportLimit: newReportLimiter(cfg.ReportRequestsPerMinute, cfg.ReportCooldown, cfg.ReportPerDay),
+	}
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -138,7 +144,7 @@ func (h *Handler) resolveUser(c *gin.Context) (string, bool) {
 			})
 			return "", false
 		}
-		log.Printf("pb verify user error: %v", err)
+		slog.Error("pb: verify user", "err", err)
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "internal error",
 			Code:  "INTERNAL_ERROR",
@@ -165,7 +171,7 @@ func (h *Handler) resolveTokenRecord(c *gin.Context) (string, *pocketbase.TokenR
 			})
 			return "", nil, false
 		}
-		log.Printf("pb ensure token error for user %s: %v", userID, err)
+		slog.Error("pb: ensure token", "user", userID, "err", err)
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "internal error",
 			Code:  "INTERNAL_ERROR",

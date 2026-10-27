@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,9 +13,9 @@ import (
 
 func TestRoutedOnlyLoggerSkipsUnknownPaths(t *testing.T) {
 	var buf bytes.Buffer
-	prev := gin.DefaultWriter
-	gin.DefaultWriter = &buf
-	defer func() { gin.DefaultWriter = prev }()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

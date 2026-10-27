@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ai-server/config"
+	"ai-server/metrics"
 )
 
 var ErrTooManyRequests = errors.New("too many requests to GigaChat")
@@ -37,7 +38,7 @@ func NewClient(cfg *config.Config) *Client {
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: transport,
+			Transport: metrics.Transport("gigachat", transport),
 		},
 	}
 }

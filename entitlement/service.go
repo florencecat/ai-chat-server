@@ -3,7 +3,7 @@ package entitlement
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -69,11 +69,11 @@ func (s *Service) Fetch(userID string) Entitlement {
 	if s.needsRefresh(e) {
 		refreshed, err := s.refresh(e)
 		if err != nil {
-			log.Printf("entitlement: refresh for user %s failed: %v", userID, err)
+			slog.Error("entitlement: refresh failed", "user", userID, "err", err)
 		} else {
 			s.persist(&refreshed)
 			if err := s.store.Upsert(&refreshed); err != nil {
-				log.Printf("entitlement: persist refreshed for user %s: %v", userID, err)
+				slog.Error("entitlement: persist refreshed", "user", userID, "err", err)
 			}
 			e = refreshed
 		}
@@ -120,7 +120,7 @@ func (s *Service) Verify(userID, purchaseID string) (Entitlement, error) {
 	// следующем Fetch/вебхуке.
 	if !sub.Acknowledged() {
 		if err := s.ru.Acknowledge(productID, purchaseID); err != nil {
-			log.Printf("entitlement: acknowledge %s/%s failed: %v", productID, purchaseID, err)
+			slog.Error("entitlement: acknowledge failed", "product", productID, "purchase", purchaseID, "err", err)
 		}
 	}
 
@@ -147,10 +147,10 @@ func (s *Service) HandleNotification(n rustore.Notification) error {
 		}
 		return s.applyInvoiceEvent(ev)
 	case rustore.NotifyTestEvent:
-		log.Printf("entitlement: rustore test notification received")
+		slog.Info("entitlement: rustore test notification received")
 		return nil
 	default:
-		log.Printf("entitlement: unhandled rustore notification type %q", n.NotificationType)
+		slog.Warn("entitlement: unhandled rustore notification", "type", n.NotificationType)
 		return nil
 	}
 }
@@ -161,7 +161,7 @@ func (s *Service) applySubscriptionEvent(ev rustore.SubscriptionEvent) error {
 		if errors.Is(err, ErrNotFound) {
 			// Покупка ещё не привязана к пользователю: клиент не успел вызвать
 			// /verify. Ничего страшного — /verify запишет актуальное состояние.
-			log.Printf("entitlement: notification for unknown purchase %s (%s)", ev.PurchaseID, ev.SubscriptionEventType)
+			slog.Warn("entitlement: notification for unknown purchase", "purchase", ev.PurchaseID, "event", ev.SubscriptionEventType)
 			return nil
 		}
 		return err
@@ -188,7 +188,7 @@ func (s *Service) applySubscriptionEvent(ev rustore.SubscriptionEvent) error {
 			refreshed.Period = ev.PeriodNew
 			*rec = refreshed
 		} else {
-			log.Printf("entitlement: refresh on %s for purchase %s: %v", ev.SubscriptionEventType, ev.PurchaseID, err)
+			slog.Error("entitlement: refresh on notification", "event", ev.SubscriptionEventType, "purchase", ev.PurchaseID, "err", err)
 			rec.Active = true
 		}
 	case rustore.EventCancelled:
@@ -263,7 +263,7 @@ func (s *Service) load(userID string) Entitlement {
 	rec, err := s.store.ByUser(userID)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
-			log.Printf("entitlement: load for user %s: %v", userID, err)
+			slog.Error("entitlement: load", "user", userID, "err", err)
 		}
 		return Free()
 	}

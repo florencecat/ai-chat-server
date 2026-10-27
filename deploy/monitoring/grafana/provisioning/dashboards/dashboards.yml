@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: ai-server
+    folder: ai-server
+    type: file
+    # Дашборды из репозитория: правки в UI не сохраняются поверх файла,
+    # их нужно экспортировать в JSON и закоммитить.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

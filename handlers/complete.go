@@ -3,7 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"unicode/utf8"
@@ -13,6 +13,7 @@ import (
 	"ai-server/advice"
 	"ai-server/entitlement"
 	"ai-server/llm"
+	"ai-server/metrics"
 	"ai-server/pocketbase"
 )
 
@@ -44,6 +45,7 @@ func (h *Handler) complete(c *gin.Context, job chatJob) {
 	// Кэш — не тратим квоту, модель не вызываем. Разделён по модели, чтобы
 	// ответ улучшенной модели не утёк бесплатному пользователю.
 	if cached, hit := h.c.Get(ns, job.cacheKey); hit {
+		metrics.ChatAnswer(job.version, string(ent.Tier), "cache")
 		qi, _ := h.pb.CheckQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
 		h.respond(c, cached, true, qi, ent.Tier)
 		return
@@ -57,6 +59,7 @@ func (h *Handler) complete(c *gin.Context, job chatJob) {
 		} else if errors.Is(err, pocketbase.ErrRateLimitDay) {
 			code = "RATE_LIMIT_DAY"
 		}
+		metrics.ChatFailure(job.version, code)
 		c.JSON(http.StatusTooManyRequests, errResp{Error: err.Error(), Code: code, Quota: &qi})
 		return
 	}
@@ -64,14 +67,16 @@ func (h *Handler) complete(c *gin.Context, job chatJob) {
 	answer, retried, err := h.ask(job, plan.Model)
 	if err != nil {
 		if errors.Is(err, llm.ErrTooManyRequests) {
+			metrics.ChatFailure(job.version, "UPSTREAM_RATE_LIMIT")
 			c.JSON(http.StatusServiceUnavailable, errResp{
 				Error: "upstream rate limit reached, try again later",
 				Code:  "UPSTREAM_RATE_LIMIT",
 			})
 			return
 		}
-		log.Printf("llm error (endpoint=%s model=%s prompt=%s): %v",
-			job.version, plan.Model, h.cfg.PromptVersion, err)
+		slog.Error("llm: no usable answer", "endpoint", job.version, "model", plan.Model,
+			"prompt", h.cfg.PromptVersion, "err", err)
+		metrics.ChatFailure(job.version, "LLM_ERROR")
 		c.JSON(http.StatusInternalServerError, errResp{
 			Error: "llm error: " + err.Error(),
 			Code:  "LLM_ERROR",
@@ -83,32 +88,36 @@ func (h *Handler) complete(c *gin.Context, job chatJob) {
 	// нельзя ни при каких условиях — цена ошибки несимметрична.
 	hits, raised := h.rf.Escalate(answer)
 	if raised {
-		log.Printf("red flags: raised urgency to %s, markers=%v (endpoint=%s user=%s)",
-			answer.Urgency, hits, job.version, userID)
+		slog.Info("red flags: raised urgency", "urgency", answer.Urgency, "markers", hits,
+			"endpoint", job.version, "user", userID)
+		metrics.RedFlagEscalation(job.version, answer.Urgency)
 	}
 
 	// Списываем квоту.
 	qi, err = h.pb.ConsumeQuota(tokenRec, plan.QuotaPerMinute, plan.QuotaPerDay)
 	if err != nil {
-		log.Printf("pb consume quota error for token %s: %v", tokenRec.ID, err)
+		slog.Error("pb: consume quota", "token", tokenRec.ID, "err", err)
 	}
 
 	responseJSON, err := json.Marshal(answer)
 	if err != nil {
-		log.Printf("marshal answer: %v", err)
+		slog.Error("chat: marshal answer", "err", err)
+		metrics.ChatFailure(job.version, "INTERNAL_ERROR")
 		c.JSON(http.StatusInternalServerError, errResp{Error: "internal error", Code: "INTERNAL_ERROR"})
 		return
 	}
 	// В кэш кладём уже нормализованный и, если надо, поднятый по красным
 	// флагам ответ: urgency не должен расходиться с текстом.
 	if err := h.c.Set(ns, job.cacheKey, responseJSON); err != nil {
-		log.Printf("cache set error: %v", err)
+		slog.Error("cache: set", "err", err)
 	}
 
-	log.Printf("chat ok endpoint=%s user=%s tier=%s model=%s prompt=%s chars=%d events=%d entries=%d urgency=%q red_flags=%d escalated=%v retried=%v",
-		job.version, userID, ent.Tier, plan.Model, h.cfg.PromptVersion,
-		utf8.RuneCountInString(answer.Response), len(answer.Events), len(answer.Entries),
-		answer.Urgency, len(hits), raised, retried)
+	slog.Info("chat ok", "endpoint", job.version, "user", userID, "tier", ent.Tier,
+		"model", plan.Model, "prompt", h.cfg.PromptVersion,
+		"chars", utf8.RuneCountInString(answer.Response), "events", len(answer.Events),
+		"entries", len(answer.Entries), "urgency", answer.Urgency, "red_flags", len(hits),
+		"escalated", raised, "retried", retried)
+	metrics.ChatAnswer(job.version, string(ent.Tier), "llm")
 
 	h.respond(c, responseJSON, false, qi, ent.Tier)
 }
@@ -156,7 +165,7 @@ func (h *Handler) ask(job chatJob, model string) (answer *advice.Answer, retried
 			if errors.Is(err, llm.ErrTooManyRequests) {
 				return nil, attempt > 1, err
 			}
-			log.Printf("llm call failed (attempt %d, endpoint=%s): %v", attempt, job.version, err)
+			slog.Warn("llm: call failed", "attempt", attempt, "endpoint", job.version, "err", err)
 			continue
 		}
 
@@ -166,22 +175,23 @@ func (h *Handler) ask(job chatJob, model string) (answer *advice.Answer, retried
 				// JSON дочитался, но ответ всё равно оборвали: текст в пузыре
 				// закончится на полуслове. Пользователю отдаём — это лучше,
 				// чем ошибка, — но в логе это повод поднять лимит.
-				log.Printf("llm answer hit the token ceiling but parsed (endpoint=%s, max_tokens=%d)",
-					job.version, h.cfg.YandexMaxTokens)
+				slog.Warn("llm: answer hit the token ceiling but parsed",
+					"endpoint", job.version, "max_tokens", h.cfg.YandexMaxTokens)
 			}
 			return answer, attempt > 1, nil
 		}
 
-		log.Printf("llm invalid answer (attempt %d, endpoint=%s, finish_reason=%q, chars=%d): %v; raw=%s",
-			attempt, job.version, resp.FinishReason, utf8.RuneCountInString(resp.Content),
-			err, previewJSON(resp.Content))
+		slog.Warn("llm: invalid answer", "attempt", attempt, "endpoint", job.version,
+			"finish_reason", resp.FinishReason, "chars", utf8.RuneCountInString(resp.Content),
+			"err", err, "raw", previewJSON(resp.Content))
+		metrics.LLMInvalidAnswer(job.version)
 
 		// Обрыв по лимиту — не случайность, а нехватка бюджета: второй
 		// одинаковый запрос упрётся в тот же потолок.
 		if resp.Truncated() {
 			req.MaxTokens = doubleBudget(req.MaxTokens, h.cfg.YandexMaxTokens)
-			log.Printf("llm: retrying with max_tokens=%d (raise YANDEX_MAX_TOKENS to avoid the extra call)",
-				req.MaxTokens)
+			slog.Warn("llm: retrying with a doubled token budget, raise YANDEX_MAX_TOKENS to avoid the extra call",
+				"max_tokens", req.MaxTokens)
 		}
 	}
 	return nil, true, err
