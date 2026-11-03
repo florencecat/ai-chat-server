@@ -583,9 +583,15 @@ Prometheus, Grafana, Loki, Alloy, node-exporter и cAdvisor. Конфиги ле
 
 ### Запуск
 
-На сервере рядом с `docker-compose.yml` (в `/opt/ai-server`) должны лежать
-`docker-compose.monitoring.yml` и каталог `deploy/monitoring`. CI их не
-копирует. В `.env` нужно добавить:
+CI не копирует на сервер ничего, кроме образа, поэтому в `/opt/ai-server`
+вручную кладутся:
+
+- обновлённый `docker-compose.yml` — в нём опубликован порт `127.0.0.1:9091`.
+  Со старым файлом ai-server метрики отдаёт, но с хоста до них не достучаться,
+  и на дашборде ai-server в состоянии DOWN;
+- `docker-compose.monitoring.yml` и каталог `deploy/monitoring`.
+
+В `.env` нужно добавить:
 
 ```bash
 GRAFANA_ADMIN_PASSWORD=<длинный пароль>
